@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+quests/generated/
+tracing/traces/
+evaluation/results/
+.env
+*.egg-info/
+dist/
+build/
