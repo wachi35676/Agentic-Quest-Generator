@@ -64,10 +64,28 @@ func _setup_scene() -> bool:
 	QuestManager.active_quests.clear()
 	QuestManager.completed_quests.clear()
 	QuestManager.global_flags.clear()
+	# Tell main.gd to skip its auto-generation kickoff — we install the
+	# fixture quest ourselves below.
+	get_tree().set_meta("skip_autogen", true)
 	var packed: PackedScene = load("res://scenes/Main.tscn")
 	_main = packed.instantiate()
 	get_tree().root.add_child(_main)
 	await get_tree().process_frame
+	await get_tree().process_frame
+	# The live game now starts EMPTY (only the Storyteller). Use the
+	# QuestSpawner to install the gold-standard fixture so existing branch
+	# playthroughs still apply.
+	var f := FileAccess.open("res://tests/fixtures/heirloom_quest.json", FileAccess.READ)
+	if f == null:
+		return false
+	var bundle: Variant = JSON.parse_string(f.get_as_text())
+	f.close()
+	if not (bundle is Dictionary):
+		return false
+	var level_root: Node = _main.get("level_root")
+	var player: Node = _main.get("player")
+	var storyteller: Node = _main.get("storyteller")
+	QuestSpawner.spawn(bundle, level_root, player, storyteller)
 	await get_tree().process_frame
 	return _grab_refs()
 

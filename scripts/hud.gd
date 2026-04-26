@@ -38,20 +38,15 @@ func _build_hearts() -> void:
 func _on_health_changed(current: int, max_v: int) -> void:
 	for c in _hearts.get_children():
 		c.queue_free()
-	# Heart.png is 80x16 = 5 cells of 16x16: cell 0 = empty ... cell 4 = full.
-	var bar_path := "res://assets/items/heart_bar.png"
-	var bar_tex: Texture2D = load(bar_path) if ResourceLoader.exists(bar_path) else null
-	for i in max_v:
-		var t := TextureRect.new()
-		if bar_tex != null:
-			var atlas := AtlasTexture.new()
-			atlas.atlas = bar_tex
-			atlas.region = Rect2(4 * 16 if i < current else 0, 0, 16, 16)
-			t.texture = atlas
-		t.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		t.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		t.custom_minimum_size = Vector2(36, 36)
-		_hearts.add_child(t)
+	# Pixel-perfect rendering — same approach as the official Ninja Adventure
+	# Godot reference: a custom Control with _draw() using
+	# draw_texture_rect_region(), no TextureRect stretching.
+	var bar := _ReceptacleBar.new()
+	bar.texture = load("res://assets/items/heart_bar.png")
+	bar.max_life = max_v * 4    # one heart = 4 life points (matches reference)
+	bar.life = current * 4
+	bar.scale = Vector2(2, 2)   # 2x for readable size at the game's zoom
+	_hearts.add_child(bar)
 
 # ---- hotbar (bottom-center) ----
 func _build_hotbar() -> void:
@@ -132,3 +127,41 @@ func _build_msg() -> void:
 func toast(text: String, duration: float = 1.6) -> void:
 	_msg.text = text
 	_msg_timer.start(duration)
+
+# Mirror of the official Ninja Adventure receptacle_bar.gd: draws a row of
+# heart "receptacles" (each = receptacle_size life) using pixel-aligned
+# draw_texture_rect_region. The strip is 5 cells wide: empty, 1/4, 1/2,
+# 3/4, full — region.x = receptacle_life * sprite_size.x.
+class _ReceptacleBar extends Control:
+	var max_life: int = 5:
+		set(v):
+			max_life = v
+			life = min(life, max_life)
+			queue_redraw()
+	var life: int = 5:
+		set(v):
+			life = clamp(v, 0, max_life)
+			queue_redraw()
+	var texture: Texture2D:
+		set(v):
+			texture = v
+			queue_redraw()
+	var receptacle_size: int = 4
+	var sprite_size: Vector2 = Vector2(16, 16)
+
+	func _draw() -> void:
+		if texture == null: return
+		var rect_sprite := Rect2(Vector2.ZERO, sprite_size)
+		var rect_draw := Rect2(Vector2.ZERO, sprite_size)
+		var life_left := life
+		for i in _receptacle_count():
+			var receptacle_life: int = clamp(life_left, 0, receptacle_size)
+			rect_sprite.position.x = receptacle_life * sprite_size.x
+			draw_texture_rect_region(texture, rect_draw, rect_sprite)
+			rect_draw.position.x += sprite_size.x
+			if life_left > 0:
+				life_left -= receptacle_size
+		custom_minimum_size = Vector2(sprite_size.x * _receptacle_count(), sprite_size.y)
+
+	func _receptacle_count() -> int:
+		return ceil(max_life / float(receptacle_size))

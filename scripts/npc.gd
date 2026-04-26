@@ -66,6 +66,20 @@ var health: int
 var _sprite: AnimatedSprite2D
 var _hurtbox: Hurtbox
 
+static func from_dict(d: Dictionary) -> NPC:
+	var n := NPC.new()
+	n.npc_name = String(d.get("npc_name", "Stranger"))
+	n.character_sheet = String(d.get("character_sheet", "Villager"))
+	n.role = String(d.get("role", ""))
+	n.max_health = int(d.get("max_health", 3))
+	n.initial_items = d.get("initial_items", [])
+	n.dialog_tree = d.get("dialog_tree", {})
+	n.start_nodes = d.get("start_nodes", [])
+	n.dialog_start = String(d.get("dialog_start", "start"))
+	if d.has("dialog_lines"):
+		n.dialog_lines.assign(d.get("dialog_lines", []))
+	return n
+
 func _ready() -> void:
 	add_to_group("npc")
 	add_to_group("interactable")

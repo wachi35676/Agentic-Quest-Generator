@@ -8,40 +8,166 @@ var player: Player
 var hud: Hud
 var dialog: DialogBox
 var quest_log: QuestLog
-var camera: Camera2D
+var camera: CameraGrid
 var level_root: Node2D
 
 var _current_npc: Node = null
 var _dialog_state: String = ""   # "menu" / "give" / "take" / "tree"
 var _dialog_node_id: String = ""
 
+var quest_agent: QuestGenAgent
+
+# The premise chosen at kickoff time, kept around so dialog expansions
+# share the same world setup as the original generation.
+var _current_premise: String = ""
+
 func _ready() -> void:
 	randomize()
-	level_root = Node2D.new()
-	level_root.name = "Level"
-	add_child(level_root)
-	_build_floor_and_walls()
+	# Use the imported Ninja Adventure village as the world. The scene
+	# instances res://system/map/map.tscn (the base) and overrides the
+	# Tilemap with hand-placed tile_data.
+	var village_path := "res://content/map/map_village.tscn"
+	if ResourceLoader.exists(village_path):
+		var scene: PackedScene = load(village_path)
+		level_root = scene.instantiate() as Node2D
+		level_root.name = "Level"
+		add_child(level_root)
+	else:
+		# Fallback for tests / pre-import: procedural floor.
+		level_root = Node2D.new()
+		level_root.name = "Level"
+		add_child(level_root)
+		_build_floor_and_walls()
 	_spawn_player()
-	_spawn_item_garden()
-	_spawn_village()
-	_spawn_combat_arena()
-	_spawn_drop_zone_sign()
-	_spawn_chest()
 	_setup_camera()
 	_setup_hud()
 	_setup_dialog()
 	_setup_quest_log()
-	_seed_sample_quests()
+	_setup_quest_agent()
+	call_deferred("_spawn_quest_givers")
+
+# Hand-placed quest-giver NPCs at known-walkable village coords (extracted
+# from the reference map_village's character spawns). Each NPC issues a
+# single LLM-generated simple quest the first time the player talks to
+# them, then walks them through active/complete dialog states.
+func _spawn_quest_givers() -> void:
+	if get_tree().has_meta("skip_autogen") and bool(get_tree().get_meta("skip_autogen")):
+		return
+	# World coords (= reference local-to-Tilemap + Tilemap offset (8,-5)).
+	_spawn_quest_giver("Farmer", "Villager", "farmer", LlmPrompts.SIMPLE_KIND_FETCH,
+			Vector2(0, 0),
+			"A weathered farmer leaning on a hoe.")
+	_spawn_quest_giver("Hunter", "Hunter", "hunter", LlmPrompts.SIMPLE_KIND_KILL,
+			Vector2(-80, -128),
+			"A sharp-eyed hunter testing a bowstring.")
+	_spawn_quest_giver("Old Sage", "OldMan", "elder", LlmPrompts.SIMPLE_KIND_FETCH,
+			Vector2(128, 32),
+			"An old sage with ink-stained fingers.")
+	# Two-stage Mystic — issues a stage-1 fetch, then a stage-2 quest
+	# whose contents depend on a moral choice the player makes after
+	# turning in stage 1. Two LLM calls per playthrough of this quest.
+	_spawn_quest_giver("Mystic", "Princess", "mystic", "two_stage",
+			Vector2(-32, 96),
+			"A veiled mystic. Her eyes don't quite focus on you.")
+	# Wanderer — issues a fully dynamic, multi-branch quest. The LLM
+	# emits 5-7 branches gated on PLAYER ACTIONS (talk vs kill vs give
+	# vs ignore). The engine's existing dialog/flag system evaluates
+	# the graph; no branch logic is hand-coded here.
+	_spawn_quest_giver("Wanderer", "Monk", "wanderer", "branching",
+			Vector2(-160, 64),
+			"A travel-stained wanderer with a story behind their eyes.")
+
+func _spawn_quest_giver(npc_name: String, sheet: String, role: String,
+		kind: String, pos: Vector2, idle_line: String) -> void:
+	var n := NPC.new()
+	n.npc_name = npc_name
+	n.character_sheet = sheet
+	n.role = role
+	n.dialog_lines = [idle_line]
+	n.position = pos
+	# Mark this NPC as a quest-giver so _on_player_interact knows to route
+	# to the LLM flow instead of the default Talk/Give/Take menu.
+	n.set_meta("quest_giver_kind", kind)
+	level_root.add_child(n)
+	# Floating name label so the player can spot the giver from a distance.
+	var l := _label_at(pos + Vector2(0, -22), npc_name)
+	level_root.add_child(l)
 
 # ---------- world ----------
 
 func _build_floor_and_walls() -> void:
-	# A solid green ColorRect floor + a single StaticBody2D ring of walls.
-	var floor := ColorRect.new()
-	floor.color = Color(0.27, 0.55, 0.27)
-	floor.size = Vector2(W * TILE, H * TILE)
-	floor.position = Vector2.ZERO
+	# Verified tile coords (cross-checked against the official Ninja Adventure
+	# Godot 4 reference project):
+	#   • TilesetFloor.png  — interior fill. Pure plain grass at (11, 12);
+	#                         decorated variants at (12, 12) and (13, 12).
+	#   • TilesetField.png  — edge/corner ring. Each biome's 3×3 panel has
+	#                         border tiles at (0..2, 6..8). We use the dark
+	#                         green grass panel at row 6-8.
+	# No bg ColorRect — the tilemap covers every cell, so a flat green behind
+	# them just produces the "plain green" look the player sees through gaps
+	# when nothing decorates a cell.
+
+	var ts := TileSet.new()
+	ts.tile_size = Vector2i(TILE, TILE)
+	# Source 0: TilesetFloor — interior grass fill. The reference project
+	# (NinjaAdventure/content/map/map_village.tscn) sprinkles tuft/flower
+	# variants liberally; we want the floor to look textured, not flat.
+	var floor_src := TileSetAtlasSource.new()
+	floor_src.texture = load("res://assets/tilesets/TilesetFloor.png")
+	floor_src.texture_region_size = Vector2i(TILE, TILE)
+	# Plain grass + small grass-blade sprinkles. The (12,12)/(13,12)
+	# variants have heavy Y-shaped tufts that read as trees at our zoom,
+	# so we use only (14,12) and (15,12) — sparse little blade marks —
+	# at low density. Most cells are plain.
+	var grass_plain := Vector2i(11, 12)
+	var grass_variants: Array[Vector2i] = [
+		Vector2i(14, 12), Vector2i(15, 12),
+	]
+	floor_src.create_tile(grass_plain)
+	for c in grass_variants:
+		floor_src.create_tile(c)
+	var floor_src_id := ts.add_source(floor_src)
+	# Source 1: TilesetField — edge/corner ring
+	var edge_src := TileSetAtlasSource.new()
+	edge_src.texture = load("res://assets/tilesets/TilesetField.png")
+	edge_src.texture_region_size = Vector2i(TILE, TILE)
+	var nw := Vector2i(0, 6); var nn := Vector2i(1, 6); var ne := Vector2i(2, 6)
+	var ww := Vector2i(0, 7);                            var ee := Vector2i(2, 7)
+	var sw := Vector2i(0, 8); var ss := Vector2i(1, 8); var se := Vector2i(2, 8)
+	for c in [nw, nn, ne, ww, ee, sw, ss, se]:
+		edge_src.create_tile(c)
+	var edge_src_id := ts.add_source(edge_src)
+
+	var floor := TileMapLayer.new()
+	floor.tile_set = ts
+	for y in H:
+		for x in W:
+			# Border ring uses TilesetField source.
+			if x == 0 and y == 0:
+				floor.set_cell(Vector2i(x, y), edge_src_id, nw)
+			elif x == W - 1 and y == 0:
+				floor.set_cell(Vector2i(x, y), edge_src_id, ne)
+			elif x == 0 and y == H - 1:
+				floor.set_cell(Vector2i(x, y), edge_src_id, sw)
+			elif x == W - 1 and y == H - 1:
+				floor.set_cell(Vector2i(x, y), edge_src_id, se)
+			elif y == 0:
+				floor.set_cell(Vector2i(x, y), edge_src_id, nn)
+			elif y == H - 1:
+				floor.set_cell(Vector2i(x, y), edge_src_id, ss)
+			elif x == 0:
+				floor.set_cell(Vector2i(x, y), edge_src_id, ww)
+			elif x == W - 1:
+				floor.set_cell(Vector2i(x, y), edge_src_id, ee)
+			else:
+				# 85% plain green, 15% subtle blade sprinkles for texture.
+				var pick: Vector2i = grass_plain
+				if randf() < 0.15:
+					pick = grass_variants[randi() % grass_variants.size()]
+				floor.set_cell(Vector2i(x, y), floor_src_id, pick)
 	level_root.add_child(floor)
+
+	# (no scattered nature props — they read as alien blobs at zoom)
 	# Walls: thin StaticBody2D rectangles around the perimeter
 	var walls := StaticBody2D.new()
 	walls.collision_layer = 1 << 0
@@ -57,28 +183,34 @@ func _build_floor_and_walls() -> void:
 	# right
 	_add_wall(walls, Vector2(W * TILE + wall_thickness / 2.0, H * TILE / 2.0), Vector2(wall_thickness, H * TILE))
 
-	# combat arena fence (SE corner): a 10x8 pen with a 1-tile gap in the north wall
-	var pen_x := (W - 12) * TILE
-	var pen_y := (H - 10) * TILE
-	var pen_w := 10 * TILE
-	var pen_h := 8 * TILE
-	# north wall left half
-	_add_wall(walls, Vector2(pen_x + pen_w * 0.25, pen_y), Vector2(pen_w * 0.4, 4))
-	# north wall right half
-	_add_wall(walls, Vector2(pen_x + pen_w * 0.75, pen_y), Vector2(pen_w * 0.4, 4))
-	# south wall
-	_add_wall(walls, Vector2(pen_x + pen_w * 0.5, pen_y + pen_h), Vector2(pen_w, 4))
-	# west wall
-	_add_wall(walls, Vector2(pen_x, pen_y + pen_h * 0.5), Vector2(4, pen_h))
-	# east wall
-	_add_wall(walls, Vector2(pen_x + pen_w, pen_y + pen_h * 0.5), Vector2(4, pen_h))
+	# (combat-arena pen and other Phase-1 sandbox geometry removed —
+	# the world only contains what the LLM bundle places.)
 
-	# arena visual outline
-	var pen_visual := ColorRect.new()
-	pen_visual.color = Color(0.6, 0.3, 0.2, 0.25)
-	pen_visual.position = Vector2(pen_x, pen_y)
-	pen_visual.size = Vector2(pen_w, pen_h)
-	level_root.add_child(pen_visual)
+func _scatter_nature_props(count: int) -> void:
+	var nature_path := "res://assets/tilesets/TilesetNature.png"
+	if not ResourceLoader.exists(nature_path):
+		return
+	var tex: Texture2D = load(nature_path)
+	# A few hand-picked atlas regions: tufts of grass + small flowers in
+	# the upper-mid rows of TilesetNature (16x16 cells at these coords).
+	var props := [
+		Vector2i(0, 6), Vector2i(1, 6), Vector2i(2, 6),    # grass tufts
+		Vector2i(0, 7), Vector2i(1, 7), Vector2i(2, 7),    # small flowers
+	]
+	for i in count:
+		var spr := Sprite2D.new()
+		var atlas := AtlasTexture.new()
+		atlas.atlas = tex
+		var coord: Vector2i = props[randi() % props.size()]
+		atlas.region = Rect2(coord.x * TILE, coord.y * TILE, TILE, TILE)
+		spr.texture = atlas
+		spr.centered = false
+		# Inset 2 tiles from the edges so props don't sit under walls.
+		spr.position = Vector2(
+			randi_range(2, W - 3) * TILE,
+			randi_range(2, H - 3) * TILE
+		)
+		level_root.add_child(spr)
 
 func _add_wall(parent: StaticBody2D, center: Vector2, size: Vector2) -> void:
 	var s := CollisionShape2D.new()
@@ -93,9 +225,16 @@ func _add_wall(parent: StaticBody2D, center: Vector2, size: Vector2) -> void:
 func _spawn_player() -> void:
 	player = Player.new()
 	player.character_name = "Knight"
-	player.position = Vector2(W * TILE / 2.0, H * TILE / 2.0)
+	# Spawn coords approximate the reference NinjaAdventure village's
+	# NinjaBlue local-to-Tilemap position (56, 53) plus the Tilemap's
+	# (8, -5) offset, giving world (64, 48) — central market square.
+	player.position = Vector2(64, 48)
 	player.request_interact.connect(_on_player_interact)
 	add_child(player)
+	# Hand the player a starter sword. Without a weapon equipped,
+	# Player._start_attack() returns before spawning a damage Hitbox,
+	# making enemies invulnerable to the swing animation.
+	player.inventory.add("sword", 1)
 
 func _spawn_item_garden() -> void:
 	# NW corner
@@ -110,266 +249,6 @@ func _spawn_item_garden() -> void:
 		var pos := origin + Vector2(x * 18, y * 18)
 		ItemPickup.spawn(level_root, id, 1, pos)
 		i += 1
-
-func _spawn_village() -> void:
-	# NE corner
-	var ox := (W - 8) * TILE
-	var oy := 3 * TILE
-	level_root.add_child(_label_at(Vector2(ox, oy - 12), "Elder's hut"))
-
-	var elder := NPC.new()
-	elder.npc_name = "Elder"
-	elder.character_sheet = "OldMan"
-	elder.role = "elder"
-	elder.max_health = 3
-	# Elder carries some loot so the betrayal path actually pays off.
-	elder.initial_items = [{"id":"coin_gold","count":2},{"id":"key_silver","count":1}]
-	elder.position = Vector2(ox + 28, oy + 24)
-	# Pick the right starting node based on quest state and what's in the
-	# player's bag right now. Evaluated top-to-bottom; first match wins.
-	elder.start_nodes = [
-		{"node":"start_done",      "requires":{"quest:stolen_heirloom":"completed"}},
-		{"node":"start_failed",    "requires":{"quest:stolen_heirloom":"failed"}},
-		{"node":"start_has_gem",   "requires":{"quest:stolen_heirloom":"active", "inv:gem_red":">=1"}},
-		{"node":"start_in_progress","requires":{"quest:stolen_heirloom":"active", "flag:elder_briefed":"true"}},
-		{"node":"start_intro",     "requires":{"quest:stolen_heirloom":"active"}},
-	]
-	elder.dialog_start = "start_intro"
-	elder.dialog_tree = {
-		"start_intro": {
-			"text": "The old man's eyes water as you approach. \"Stranger... thank the heavens. My family's heirloom — a red gem older than this village — has been stolen. A bandit has been camping to the south-west, drinking himself stupid on what he can rob from travelers. He took it three nights past while I slept. Please... I have not the strength left to fetch it myself.\"",
-			"choices": [
-				{"id":"accept", "text":"I'll find your gem. You have my word.",
-					"actions":["set_flag:elder_briefed=true"], "next":"intro_accept"},
-				{"id":"ask_pay", "text":"What's in it for me?", "next":"intro_payment"},
-				{"id":"refuse", "text":"Find someone else.", "next":"intro_refuse"},
-			],
-		},
-		"intro_payment": {
-			"text": "\"I am not a wealthy man, but I have set aside a purse of gold for whoever returns my gem. Take it as recompense for the trouble — and ask not how an old man came by it.\"",
-			"choices": [
-				{"id":"accept_after_pay", "text":"Then I'll fetch it.",
-					"actions":["set_flag:elder_briefed=true"], "next":"intro_accept"},
-				{"id":"refuse_after_pay","text":"Not enough.", "next":"intro_refuse"},
-			],
-		},
-		"intro_refuse": {
-			"text": "\"Then go in peace. May you sleep more soundly than I do tonight.\"",
-			"choices": [],
-		},
-		"intro_accept": {
-			"text": "\"Bless you. The bandit's camp is to the south-west — you can't miss the smoke. Try... try not to start a fire if there is another way. He was a good man, once.\"",
-			"choices": [],
-		},
-		"start_in_progress": {
-			"text": "\"Back already? Without the gem? The bandit is to the SOUTH-WEST, friend. Mind the brambles.\"",
-			"choices": [
-				{"id":"reassure", "text":"I'll find it. I just needed a moment.", "next":"end"},
-				{"id":"vent", "text":"That bandit is more trouble than he looks.", "next":"vent_reply"},
-				# Only available if the bandit has shared his backstory with you.
-				{"id":"confront", "text":"He says the gem belonged to his mother. Is that true?",
-					"requires":{"flag:bandit_sympathy":"true"}, "next":"confront_response"},
-			],
-		},
-		"confront_response": {
-			"text": "The Elder is silent a long while. His mouth works without sound. \"...So he told you. I had hoped he'd forgotten. I won that gem from his mother in a fool's wager when she was sick and out of coin and could not refuse the table. I have carried that shame these forty years. It IS his by blood. But it is also all I have left of her — she was a friend to me, before. Whatever you do with this knowledge, do it kindly.\"",
-			"choices": [
-				{"id":"will_mediate", "text":"Then let me try to set this right between you.",
-					"actions":["set_flag:elder_confessed=true"], "next":"mediate_blessing"},
-				{"id":"will_take", "text":"You don't deserve it. I'll take it to him.",
-					"actions":["set_flag:elder_confessed=true"], "next":"angry_dismiss"},
-				{"id":"shrug", "text":"That's between you two. (leave)", "next":"end"},
-			],
-		},
-		"mediate_blessing": {
-			"text": "The Elder bows his head. \"Then you carry more than a gem. Tell him... tell him I'm sorry. I should have said it forty years ago.\"",
-			"choices": [],
-		},
-		"angry_dismiss": {
-			"text": "\"Fair. I'll not stop you.\" His eyes do not meet yours.",
-			"choices": [],
-		},
-		"vent_reply": {
-			"text": "\"Aye. He always was a slippery one, even as a boy. If words won't move him, perhaps a sharper tongue will.\"",
-			"choices": [],
-		},
-		"start_has_gem": {
-			"text": "The Elder's eyes widen. \"You have it. By the saints — you actually have it. Hand it here, hand it here, my hands are shaking...\"",
-			"choices": [
-				{"id":"hand_gem", "text":"(Hand over the gem.)", "next":"end"},
-				{"id":"keep_it", "text":"Hmm... actually, this gem is rather pretty.", "next":"keep_response"},
-			],
-		},
-		"keep_response": {
-			"text": "\"You wouldn't. You promised. ...You promised.\"",
-			"choices": [
-				{"id":"return_it","text":"You're right. (Return to handing it over.)", "next":"start_has_gem"},
-				{"id":"walk_away","text":"(walk away)", "next":"end"},
-			],
-		},
-		"start_done": {
-			"text": "\"My friend. Sit, sit. The gem is on its altar again, where it belongs. Whatever you did out there — I will not ask. Some debts are paid in silver, but yours is paid in something I cannot put a name to.\"",
-			"choices": [],
-		},
-		"start_failed": {
-			"text": "(There is no answer. The Elder is gone.)",
-			"choices": [],
-		},
-	}
-	# Choosing "hand_gem" doesn't itself transfer the item — the actual
-	# transfer is the player picking the gem in the standard Give flow once
-	# the conversation closes. To make handover happen IN the dialog, expose
-	# a "Give" affordance: we add it as an action.
-	elder.dialog_tree["start_has_gem"]["choices"][0]["actions"] = ["take_player:gem_red"]
-	level_root.add_child(elder)
-
-	# --- Bandit (south-west) — quest target with rich dialog tree ---
-	var bandit := NPC.new()
-	bandit.npc_name = "Bandit"
-	bandit.character_sheet = "Hunter"
-	bandit.role = "bandit"
-	bandit.max_health = 4
-	bandit.initial_items = [{"id":"gem_red","count":1}, {"id":"coin_gold","count":1}]
-	bandit.position = Vector2(6 * TILE, (H - 8) * TILE)
-	bandit.start_nodes = [
-		{"node":"start_mediated",  "requires":{"flag:mediated":"true"}},
-		{"node":"start_post_deal", "requires":{"flag:persuaded":"true"}},
-		{"node":"start_post_deal", "requires":{"flag:bribed":"true"}},
-		{"node":"start_post_food", "requires":{"flag:traded_food":"true"}},
-		{"node":"start_post_intimidated", "requires":{"flag:intimidated":"true"}},
-		{"node":"start_post_ally", "requires":{"flag:bandit_ally":"true"}},
-		{"node":"start_briefed",   "requires":{"flag:elder_briefed":"true"}},
-		{"node":"start_unbriefed", "requires":{}},
-	]
-	bandit.dialog_start = "start_unbriefed"
-	bandit.dialog_tree = {
-		"start_unbriefed": {
-			"text": "A wiry man slouches against a half-burnt tree, knife in his lap. He doesn't bother standing. \"You're a long way from anywhere, friend. Either you're lost, or you're nosy, and either way it's a problem for one of us.\"",
-			"choices": [
-				{"id":"who_are_you", "text":"Who are you?", "next":"who_reply"},
-				{"id":"leave_unbriefed", "text":"My mistake. (leave)", "next":"end"},
-			],
-		},
-		"who_reply": {
-			"text": "\"Names are for tax collectors. Folks around here just call me trouble. Now, was there something you wanted, or did you come to admire the view?\"",
-			"choices": [
-				{"id":"leave_uncurious", "text":"Just passing through.", "next":"end"},
-			],
-		},
-		"start_briefed": {
-			"text": "The Bandit recognises you. \"Ah. The old man finally got someone to do his fetching for him, did he? I wondered when this little drama would reach me. Get to the point — what's it going to be?\"",
-			"choices": [
-				{"id":"ask_gem", "text":"The red gem. I want it back.", "next":"ask"},
-				{"id":"ally_offer", "text":"What if I weren't on his side?", "next":"ally"},
-				{"id":"why_take", "text":"Why did you steal it in the first place?", "next":"backstory"},
-				{"id":"leave_briefed", "text":"I've heard enough. (leave)", "next":"end"},
-			],
-		},
-		"backstory": {
-			"text": "He laughs, dry as dust. \"Steal? That gem belonged to my mother before that old crow ever set eyes on it. He won it off her in a card game when I was a boy and her hands were too tired to count. So no, I didn't steal it. I took it back.\"",
-			"choices": [
-				{"id":"believe", "text":"...That changes things.",
-					"actions":["set_flag:bandit_sympathy=true"], "next":"backstory_after"},
-				{"id":"disbelieve", "text":"Convenient story.", "next":"ask"},
-			],
-		},
-		"backstory_after": {
-			"text": "\"Good of you to listen. Doesn't change what you came for, though. Make your choice.\"",
-			"choices": [
-				{"id":"ask_gem2", "text":"I still need the gem.", "next":"ask"},
-				{"id":"ally_offer2","text":"Maybe the old man's the one who should answer for this.", "next":"ally"},
-			],
-		},
-		"ask": {
-			"text": "\"So you want the red rock. Course you do. Well, I'm a reasonable sort, when the wind's right. Pick a wind.\"",
-			"choices": [
-				{"id":"persuade_honest", "text":"He's a frail old man. Just return it — call it a kindness.",
-					"actions":["set_flag:persuaded=true","give_player:gem_red"], "next":"honest_out"},
-				{"id":"persuade_bribe", "text":"I can pay you a coin for it.",
-					"actions":["take_player:coin_gold","set_flag:bribed=true","give_player:gem_red"], "next":"bribe_out"},
-				# Sword threat — only visible if the player has a sword equipped on hand.
-				{"id":"threaten_sword", "text":"[draw blade] You can hand it over, or I can take it.",
-					"requires":{"inv:sword":">=1"},
-					"actions":["set_flag:intimidated=true","give_player:gem_red"], "next":"intimidated_out"},
-				# Trade food — only when player carries food in their bag.
-				{"id":"trade_fish", "text":"I have fish to spare. Trade?",
-					"requires":{"inv:fish":">=1"},
-					"actions":["take_player:fish","set_flag:traded_food=true","give_player:gem_red"], "next":"food_out"},
-				{"id":"trade_meat", "text":"How about a hot meal? I have meat.",
-					"requires":{"inv:meat":">=1"},
-					"actions":["take_player:meat","set_flag:traded_food=true","give_player:gem_red"], "next":"food_out"},
-				{"id":"trade_honey", "text":"Sweet tooth? I have honey.",
-					"requires":{"inv:honey":">=1"},
-					"actions":["take_player:honey","set_flag:traded_food=true","give_player:gem_red"], "next":"food_out"},
-				# Mediation finisher — only available if both backstory and elder's confession are unlocked.
-				{"id":"deliver_truth", "text":"The Elder confessed. He's sorry. He said he should have said so forty years ago.",
-					"requires":{"flag:bandit_sympathy":"true","flag:elder_confessed":"true"},
-					"actions":["set_flag:mediated=true","give_player:gem_red"], "next":"mediate_out"},
-				{"id":"insult", "text":"Hand it over before I make you.", "next":"insult_out"},
-				{"id":"back", "text":"(say nothing — step back)", "next":"start_briefed"},
-			],
-		},
-		"intimidated_out": {
-			"text": "He weighs his knife against your steel and decides he likes his hand the way it is. Spits, pulls the gem from his belt, and slings it at your feet. \"Take it. Walk away. Don't ever come back here.\"",
-			"choices": [],
-		},
-		"food_out": {
-			"text": "He blinks at the offering, then laughs — short and surprised. \"You've a strange way of bargaining.\" He eats. He chews. He hands you the gem. \"For the meal. Wasn't expecting kindness today.\"",
-			"choices": [],
-		},
-		"mediate_out": {
-			"text": "He stares at you. The smirk leaves his face for the first time. \"He said that? After all this time?\" He turns the gem over once, twice, then presses it into your hand. \"Take it back to him. Tell him... tell him I heard. And tell him my mother forgave him long before I was old enough to understand.\"",
-			"choices": [],
-		},
-		"honest_out": {
-			"text": "He stares at you a long moment, then snorts and tosses you the gem. \"Tell the old fool he doesn't deserve you. And tell him we're square.\"",
-			"choices": [],
-		},
-		"bribe_out": {
-			"text": "He bites the coin, grins yellow, and presses the gem into your palm. \"Pleasure doing business. The old man's a piece of work, but coin spends the same.\"",
-			"choices": [],
-		},
-		"insult_out": {
-			"text": "His grin goes flat. \"Then we'll see whose hands shake first.\" He doesn't give you the gem. (Draw your sword if you mean it.)",
-			"choices": [],
-		},
-		"ally": {
-			"text": "He tilts his head. \"Now THAT is interesting. You think the old crow has it coming, do you? Tell you what — you put him in the ground, and the gem's yours, plus a bit extra. He's got things in that hut of his I'd rather not chase down myself.\"",
-			"choices": [
-				{"id":"ally_accept", "text":"You have a deal.",
-					"actions":["set_flag:bandit_ally=true"], "next":"ally_accepted"},
-				{"id":"ally_decline", "text":"On reflection, no. (back)", "next":"start_briefed"},
-			],
-		},
-		"ally_accepted": {
-			"text": "\"Find me when it's done. Don't make me wait — patience and I parted ways years ago.\"",
-			"choices": [],
-		},
-		"start_post_deal": {
-			"text": "He nods at you with something almost like respect. \"Still breathing. Good. Go on — the old man's waiting.\"",
-			"choices": [],
-		},
-		"start_post_ally": {
-			"text": "\"Is it done? Don't make me ask twice.\"",
-			"choices": [
-				{"id":"not_yet","text":"Not yet.", "next":"end"},
-			],
-		},
-		"start_post_food": {
-			"text": "He raises a finger in mock salute. \"Decent traveler. Rare these days. Now leave me to my fire.\"",
-			"choices": [],
-		},
-		"start_post_intimidated": {
-			"text": "He doesn't look up. \"Move along.\"",
-			"choices": [],
-		},
-		"start_mediated": {
-			"text": "The bandit looks lighter than when you met him. \"Strange feeling, this. Forty years of cold smoke, and you blow it away in an afternoon. Go on, then. He's waiting for you.\"",
-			"choices": [],
-		},
-	}
-	level_root.add_child(bandit)
-	level_root.add_child(_label_at(bandit.position + Vector2(0, -22), "Bandit"))
 
 func _spawn_combat_arena() -> void:
 	# SE corner — three enemies, one of each type
@@ -425,12 +304,46 @@ func _label_at(pos: Vector2, text: String) -> Control:
 # ---------- camera/hud/dialog ----------
 
 func _setup_camera() -> void:
-	camera = Camera2D.new()
+	# Room-by-room camera matching the reference NinjaAdventure project.
+	# Grid cell = 320×176 (the village's room dimensions). Viewport is
+	# 640×352 with zoom 2, so visible area exactly fills one cell.
+	camera = CameraGrid.new()
 	camera.zoom = Vector2(2, 2)
-	camera.position_smoothing_enabled = true
-	camera.position_smoothing_speed = 8.0
-	player.add_child(camera)
+	camera.grid_size = Vector2(320, 176)
+	camera.transition_time = 0.8
+	# Clamp camera to the village's tile bounds so it never reveals void
+	# beyond the map. Bounds were measured by parsing tile_data:
+	# tiles span x=[-27,12] y=[-15,18] -> world px (×16) including the
+	# Tilemap+Map node offsets (8,-5)+(8,8) = (16,3).
+	camera.limit_left = -432 + 16
+	camera.limit_right = 208 + 16 + 16
+	camera.limit_top = -240 + 3
+	camera.limit_bottom = 304 + 3 + 16
+	camera.target = player
+	level_root.add_child(camera)
+	camera.teleport_to(player.global_position)
 	camera.make_current()
+	# Perimeter walls so the player can't walk off the map either.
+	_add_world_walls()
+
+# Thin invisible StaticBody2D rectangles ringing the village bounds.
+func _add_world_walls() -> void:
+	var walls := StaticBody2D.new()
+	walls.collision_layer = 1 << 0
+	level_root.add_child(walls)
+	var t: int = 16   # wall thickness
+	var L := -432 + 16
+	var R := 208 + 16 + 16
+	var T := -240 + 3
+	var B := 304 + 3 + 16
+	var w := R - L
+	var h := B - T
+	var cx := (L + R) * 0.5
+	var cy := (T + B) * 0.5
+	_add_wall(walls, Vector2(cx,    T - t * 0.5),   Vector2(w + t * 2, t))   # top
+	_add_wall(walls, Vector2(cx,    B + t * 0.5),   Vector2(w + t * 2, t))   # bottom
+	_add_wall(walls, Vector2(L - t * 0.5, cy),       Vector2(t,         h + t * 2))   # left
+	_add_wall(walls, Vector2(R + t * 0.5, cy),       Vector2(t,         h + t * 2))   # right
 
 func _setup_hud() -> void:
 	hud = Hud.new()
@@ -443,90 +356,347 @@ func _setup_quest_log() -> void:
 	quest_log = QuestLog.new()
 	add_child(quest_log)
 
-func _seed_sample_quests() -> void:
-	# Single branching test quest with FOUR success paths and a fail
-	# condition. Every branch and the fail are pure data — exactly the shape
-	# the LLM phase will emit via add_quest_from_dict().
-	QuestManager.add_quest_from_dict({
-		"id": "stolen_heirloom",
-		"title": "The Stolen Heirloom",
-		"description": "The Elder's red gem was taken by a Bandit camped to the south-west. How you handle it is up to you.",
+func _setup_quest_agent() -> void:
+	quest_agent = QuestGenAgent.new()
+	add_child(quest_agent)
+	quest_agent.progress.connect(_on_agent_progress)
+
+func _on_agent_progress(stage: String, detail: String) -> void:
+	hud.toast("[%s] %s" % [stage, detail], 1.5)
+
+# Simple-quest flow per quest-giver NPC.
+# State stored on the NPC's `memory` dict:
+#   memory.quest_id     — id of the quest this NPC has issued (if any)
+#   memory.quest_state  — "active" | "complete" (else not issued yet)
+# The first interaction triggers an LLM generation call. Subsequent
+# interactions branch on quest_state.
+var _generating_for: NPC = null
+
+func _handle_quest_giver(npc: NPC) -> void:
+	# Concurrency guard: HTTPRequest can only run one call at a time, and
+	# a second player-interact during generation overlapped requests in
+	# the logs. Block new calls until the in-flight one finishes.
+	if _generating_for != null:
+		dialog.show_actions(npc.npc_name,
+				"Patience. %s is still thinking..." % _generating_for.npc_name,
+				["Bye"])
+		return
+	var kind: String = String(npc.get_meta("quest_giver_kind", "fetch"))
+	if kind == "two_stage":
+		await _handle_two_stage(npc)
+		return
+	if kind == "branching":
+		await _handle_branching(npc)
+		return
+	var qid: String = String(npc.memory.get("quest_id", ""))
+	if qid == "":
+		# First interaction — generate.
+		_generating_for = npc
+		dialog.show_actions(npc.npc_name, "Hold on, traveler — let me think...", [])
+		hud.toast("[%s] writing your quest..." % npc.npc_name, 4.0)
+		var result: Dictionary = await quest_agent.generate_simple(
+				npc.npc_name, npc.role, kind)
+		_generating_for = null
+		if not result.get("ok", false):
+			var err: String = String(result.get("error", "unknown"))
+			dialog.show_actions(npc.npc_name,
+					"Words fail me — try again. (%s)" % err, ["Bye"])
+			print("[main] simple-quest fail for %s: %s" % [npc.npc_name, err])
+			return
+		var q: Dictionary = result.quest
+		_register_simple_quest(npc, q)
+		_spawn_quest_targets(q, npc.global_position)
+		var intro: String = String(q.get("dialog", {}).get("intro",
+				String(q.get("description", "I have a task for you."))))
+		dialog.show_actions(npc.npc_name, intro, ["Accept"])
+		return
+	# Quest already issued — check status.
+	var quest := QuestManager.get_quest(qid)
+	if quest != null and quest.status == Quest.Status.COMPLETED:
+		var line: String = String(npc.memory.get("dialog_complete",
+				"Many thanks. Take this with my gratitude."))
+		dialog.show_actions(npc.npc_name, line, ["Bye"])
+		_grant_simple_rewards(npc)
+		npc.memory["quest_state"] = "complete"
+		return
+	# Active. Offer Give so the player can hand over the requested item.
+	var line2: String = String(npc.memory.get("dialog_active",
+			"Still on the way? Hurry."))
+	dialog.show_actions(npc.npc_name, line2, ["Give", "Bye"])
+
+# Branching dynamic quest flow. The hand-placed Wanderer is just the
+# kickoff: a single click → big-bundle generation → QuestSpawner installs
+# everything. From that point on, the engine handles the entire quest via
+# its existing dialog-tree + branch system. Source code adds zero branch
+# logic — the LLM bundle defines all of it.
+#
+# memory keys:
+#   branching_started - true once we've kicked off generation
+func _handle_branching(npc: NPC) -> void:
+	if bool(npc.memory.get("branching_started", false)):
+		# Quest already running — just close the dialog so the player
+		# isn't gated by the Wanderer; they should be talking to the
+		# spawned NPCs instead.
+		dialog.show_actions(npc.npc_name,
+				"Go on. The story isn't with me anymore — find them.",
+				["Bye"])
+		return
+	if _generating_for != null:
+		dialog.show_actions(npc.npc_name,
+				"Wait. Another tale is still being spun.", ["Bye"])
+		return
+	_generating_for = npc
+	dialog.show_actions(npc.npc_name,
+			"Sit. Listen. Then decide for yourself.\n\n"
+			+ "(Conjuring a story... 30-90s)",
+			[])
+	hud.toast("[%s] weaving a branching tale (qwen3:14b)..." % npc.npc_name, 6.0)
+	var r: Dictionary = await quest_agent.generate_branching(npc.npc_name, npc.role)
+	_generating_for = null
+	if not r.get("ok", false):
+		var err: String = String(r.get("error", "unknown"))
+		dialog.show_actions(npc.npc_name,
+				"Words won't come tonight. (%s)" % err, ["Bye"])
+		print("[main] branching fail for %s: %s" % [npc.npc_name, err])
+		return
+	var bundle: Dictionary = r.bundle
+	# QuestSpawner instantiates the LLM-defined NPCs, scatters items,
+	# adds the multi-branch quest. Pass the Wanderer as `keep` so the
+	# wipe step doesn't delete our hand-placed quest-givers.
+	QuestSpawner.spawn(bundle, level_root, player, _all_quest_givers())
+	npc.memory["branching_started"] = true
+	var qtitle: String = String(bundle.get("quest", {}).get("title", "A tale"))
+	var brs: Array = bundle.get("quest", {}).get("branches", [])
+	hud.toast("Quest accepted: %s (%d branches)" % [qtitle, brs.size()], 4.0)
+	dialog.show_actions(npc.npc_name,
+			"Walk. Talk. Or strike. Each path leads somewhere different.",
+			["Bye"])
+
+# Returns the set of hand-placed quest-givers so QuestSpawner's wipe step
+# preserves them when installing the bundle's LLM-spawned NPCs.
+func _all_quest_givers() -> Array:
+	var out: Array = []
+	for child in level_root.get_children():
+		if child is NPC and child.has_meta("quest_giver_kind"):
+			out.append(child)
+	return out
+
+# Two-stage quest flow.
+# memory keys used:
+#   stage          - 0 (no quest) | 1 | "choosing" | 2 | "done"
+#   quest_id       - the currently-active quest id
+#   stage1_summary - one-line description of what the player did in stage 1
+#                    (passed to the LLM when generating stage 2 so the
+#                     model can reference the context)
+func _handle_two_stage(npc: NPC) -> void:
+	var stage: Variant = npc.memory.get("stage", 0)
+	# State 0: no quest yet — generate stage 1.
+	if stage == 0:
+		_generating_for = npc
+		dialog.show_actions(npc.npc_name, "Hold... let me see what fate wants.", [])
+		hud.toast("[%s] reading the threads..." % npc.npc_name, 4.0)
+		var r1: Dictionary = await quest_agent.generate_stage1(npc.npc_name, npc.role)
+		_generating_for = null
+		if not r1.get("ok", false):
+			dialog.show_actions(npc.npc_name,
+					"The threads are tangled. Return when the veil clears. (%s)" % r1.get("error",""), ["Bye"])
+			return
+		var q: Dictionary = r1.quest
+		_register_simple_quest(npc, q)
+		_spawn_quest_targets(q, npc.global_position)
+		npc.memory["stage"] = 1
+		npc.memory["stage1_summary"] = "%s — %s" % [
+				String(q.get("title","")), String(q.get("description",""))]
+		dialog.show_actions(npc.npc_name, String(q.get("dialog",{}).get("intro",
+				q.get("description","Bring it to me."))), ["Accept"])
+		return
+	# State 1: stage-1 quest active or completed.
+	if stage == 1:
+		var qid: String = String(npc.memory.get("quest_id",""))
+		var quest := QuestManager.get_quest(qid)
+		if quest != null and quest.status == Quest.Status.COMPLETED:
+			# Time for the moral choice.
+			npc.memory["stage"] = "choosing"
+			dialog.show_actions(npc.npc_name,
+					"Now — what will you do with what we now hold? "
+					+ "Use it as we agreed... or twist it for yourself.",
+					["Path of Honor", "Path of Greed"])
+			return
+		# Stage 1 still active — usual Give/Bye.
+		var line2: String = String(npc.memory.get("dialog_active",
+				"The veil holds. Hurry."))
+		dialog.show_actions(npc.npc_name, line2, ["Give", "Bye"])
+		return
+	# State "choosing": player should still be picking — prompt again.
+	if stage == "choosing":
+		dialog.show_actions(npc.npc_name, "Choose. The threads grow impatient.",
+				["Path of Honor", "Path of Greed"])
+		return
+	# State 2: stage-2 quest active or completed.
+	if stage == 2:
+		var qid2: String = String(npc.memory.get("quest_id",""))
+		var quest2 := QuestManager.get_quest(qid2)
+		if quest2 != null and quest2.status == Quest.Status.COMPLETED:
+			var line: String = String(npc.memory.get("dialog_complete",
+					"It is finished. The threads close around you."))
+			dialog.show_actions(npc.npc_name, line, ["Bye"])
+			_grant_simple_rewards(npc)
+			npc.memory["stage"] = "done"
+			return
+		var line3: String = String(npc.memory.get("dialog_active",
+				"The path is yours to walk. Return when it ends."))
+		var actions: Array = ["Give", "Bye"]
+		dialog.show_actions(npc.npc_name, line3, actions)
+		return
+	# Done.
+	dialog.show_actions(npc.npc_name,
+			"Our threads have parted, traveler. Walk well.", ["Bye"])
+
+# Generates stage 2 once the player picks a path. Called from the dialog
+# action handler when the user clicks PathHonor or PathGreed.
+func _start_stage_two(npc: NPC, path: String) -> void:
+	if _generating_for != null:
+		dialog.show_actions(npc.npc_name,
+				"Patience — another's thread is still spinning.", ["Bye"])
+		return
+	_generating_for = npc
+	dialog.show_actions(npc.npc_name,
+			"Then so it is. I weave the next path...", [])
+	hud.toast("[%s] weaving stage 2 (%s)" % [npc.npc_name, path], 5.0)
+	var summary: String = String(npc.memory.get("stage1_summary",""))
+	var r: Dictionary = await quest_agent.generate_stage2(
+			npc.npc_name, npc.role, summary, path)
+	_generating_for = null
+	if not r.get("ok", false):
+		dialog.show_actions(npc.npc_name,
+				"The threads frayed. Try again. (%s)" % r.get("error",""), ["Bye"])
+		# Reset to choosing so the player can retry.
+		npc.memory["stage"] = "choosing"
+		return
+	var q: Dictionary = r.quest
+	# Clear the previous quest_id so _register_simple_quest installs the new one cleanly.
+	npc.memory["quest_id"] = ""
+	npc.memory["rewarded"] = false
+	_register_simple_quest(npc, q)
+	_spawn_quest_targets(q, npc.global_position)
+	npc.memory["stage"] = 2
+	dialog.show_actions(npc.npc_name, String(q.get("dialog",{}).get("intro",
+			q.get("description","Walk this new path."))), ["Accept"])
+
+# Wraps the simple-quest dict (single objective shape) into the standard
+# Quest dict the QuestManager expects (objectives array), then registers
+# both the quest and the per-NPC dialog snippets.
+func _register_simple_quest(npc: NPC, q: Dictionary) -> void:
+	var obj: Dictionary = q.get("objective", {})
+	# Force `give` objectives to point at THIS NPC, regardless of what
+	# the LLM emitted — the model sometimes uses a generic role name
+	# ("Farmer") instead of the actual `npc_name`.
+	if String(obj.get("type","")) == "give":
+		var params: Dictionary = obj.get("params", {})
+		params["npc_name"] = npc.npc_name
+		obj["params"] = params
+		q["objective"] = obj
+	var quest_dict: Dictionary = {
+		"id": String(q.get("id", "simple_%s_%d" % [npc.npc_name, randi()])),
+		"title": String(q.get("title", "A small task")),
+		"description": String(q.get("description", "")),
 		"sequential": false,
-		# No primary objectives — every path is a branch.
-		"objectives": [],
-		"rewards": [],
-		"branches": [
-			{
-				"id": "combat",
-				"description": "Kill the Bandit and return the gem.",
-				"objectives": [
-					{"type":"kill_npc","params":{"npc_name":"Bandit"},"required":1,"description":"Defeat the Bandit"},
-					{"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Give the gem to the Elder"},
-				],
-				"rewards": [{"item_id":"coin_gold","count":5},{"item_id":"potion_red","count":2}],
-			},
-			{
-				"id": "persuade",
-				"description": "Convince the Bandit to give the gem freely.",
-				"requires_flags": {"persuaded":"true"},
-				"objectives": [
-					{"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Return the gem to the Elder"},
-				],
-				"rewards": [{"item_id":"coin_gold","count":5},{"item_id":"key_silver","count":1},{"item_id":"potion_red","count":2}],
-			},
-			{
-				"id": "bribe",
-				"description": "Pay the Bandit off and return the gem.",
-				"requires_flags": {"bribed":"true"},
-				"objectives": [
-					{"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Return the gem to the Elder"},
-				],
-				"rewards": [{"item_id":"coin_gold","count":3},{"item_id":"key_silver","count":1}],
-			},
-			{
-				"id": "side_with_bandit",
-				"description": "Side with the Bandit. Eliminate the Elder.",
-				"requires_flags": {"bandit_ally":"true"},
-				"objectives": [
-					{"type":"kill_npc","params":{"npc_name":"Elder"},"required":1,"description":"Eliminate the Elder"},
-				],
-				"rewards": [{"item_id":"axe","count":1},{"item_id":"gem_red","count":2},{"item_id":"coin_silver","count":3}],
-			},
-			{
-				"id": "trade_food",
-				"description": "Trade food to the Bandit and return the gem.",
-				"requires_flags": {"traded_food":"true"},
-				"objectives": [
-					{"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Return the gem to the Elder"},
-				],
-				"rewards": [{"item_id":"coin_gold","count":4},{"item_id":"key_silver","count":1},{"item_id":"meat","count":2}],
-			},
-			{
-				"id": "intimidate",
-				"description": "Threaten the Bandit at swordpoint and return the gem.",
-				"requires_flags": {"intimidated":"true"},
-				"objectives": [
-					{"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Return the gem to the Elder"},
-				],
-				"rewards": [{"item_id":"coin_gold","count":4}],
-			},
-			{
-				"id": "mediate",
-				"description": "Reconcile the Elder and the Bandit. Return the gem with the truth.",
-				"requires_flags": {"mediated":"true"},
-				"objectives": [
-					{"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Return the gem to the Elder"},
-				],
-				"rewards": [{"item_id":"coin_gold","count":8},{"item_id":"key_gold","count":1},{"item_id":"medipack","count":1},{"item_id":"potion_red","count":2}],
-			},
-		],
-		# If the Elder dies WITHOUT siding with the Bandit, the quest fails.
-		# Branches are evaluated before fail conditions so side_with_bandit
-		# wins when its flag is set.
-		"fail_conditions": [
-			{"type":"kill_npc","params":{"npc_name":"Elder"},"required":1,"description":"Killed the Elder"},
-		],
-	})
+		"objectives": [obj] if not obj.is_empty() else [],
+		"rewards": q.get("rewards", []),
+		"branches": [],
+		"fail_conditions": [],
+	}
+	QuestManager.add_quest_from_dict(quest_dict)
+	npc.memory["quest_id"] = quest_dict.id
+	npc.memory["quest_state"] = "active"
+	var d: Dictionary = q.get("dialog", {})
+	npc.memory["dialog_active"] = String(d.get("active", "Still working on it?"))
+	npc.memory["dialog_complete"] = String(d.get("complete", "Well done."))
+	hud.toast("Quest accepted: %s" % quest_dict.title, 3.0)
+
+# After a simple quest is registered, materialise its target(s) into the
+# world AROUND THE QUEST-GIVER. The giver is by definition standing in
+# walkable terrain (the player just talked to them), so spreading targets
+# in a short ring around them keeps everything inside the playable area
+# instead of in walls or buildings.
+func _spawn_quest_targets(q: Dictionary, origin: Vector2) -> void:
+	var obj: Dictionary = q.get("objective", {})
+	var t: String = String(obj.get("type", ""))
+	var required: int = int(obj.get("required", 1))
+	var p: Dictionary = obj.get("params", {})
+	# Item radius: 24-56 px (1.5–3.5 tiles).  Enemy radius: 48-96 px.
+	# Both stay within the same "room" so the player can find them after
+	# accepting without walking off-map.
+	match t:
+		"give", "collect":
+			var iid: String = String(p.get("item_id", ""))
+			if iid == "" or not ItemDB.has(iid):
+				return
+			# Tight ring (16-32 px = 1-2 tiles) so items land on the same
+			# tile the giver is standing on (which we know is walkable).
+			var positions := _ring_spots(origin, required + 1, 16.0, 32.0)
+			for pos in positions:
+				ItemPickup.spawn(level_root, iid, 1, pos)
+		"kill_enemy":
+			var etype: String = String(p.get("enemy_type", "Slime"))
+			var positions := _ring_spots(origin, required, 48.0, 96.0)
+			for pos in positions:
+				var e := Enemy.new()
+				e.enemy_type = etype
+				e.position = pos
+				match etype:
+					"BlueBat":
+						e.move_speed = 50.0
+						e.loot_table = ["feather"]
+					"Skull":
+						e.move_speed = 32.0
+						e.loot_table = ["coin_silver", "coin_gold"]
+					_:
+						e.loot_table = ["grass", "gem_green"]
+				level_root.add_child(e)
+
+# Distributes `n` positions evenly around `origin` at varying radii. Avoids
+# stacking by giving each spawn its own angle slice.
+func _ring_spots(origin: Vector2, n: int, r_min: float, r_max: float) -> Array[Vector2]:
+	var out: Array[Vector2] = []
+	if n <= 0: return out
+	for i in n:
+		var angle: float = (TAU * i) / float(n) + randf_range(-0.3, 0.3)
+		var radius: float = randf_range(r_min, r_max)
+		out.append(origin + Vector2(cos(angle), sin(angle)) * radius)
+	return out
+
+func _grant_simple_rewards(npc: NPC) -> void:
+	if npc.memory.get("rewarded", false):
+		return
+	npc.memory["rewarded"] = true
+	var qid: String = String(npc.memory.get("quest_id", ""))
+	var quest := QuestManager.get_quest(qid)
+	if quest == null: return
+	for r in quest.rewards:
+		var iid: String = String(r.get("item_id",""))
+		var count: int = int(r.get("count", 1))
+		if ItemDB.has(iid) and count > 0:
+			player.inventory.add(iid, count)
+			hud.toast("+%d %s" % [count, iid], 2.0)
+
+func _kickoff_initial_quest() -> void:
+	# Pick a random premise from the pool every run so each playthrough
+	# starts with a different setup. The pool intentionally avoids the
+	# Elder/Bandit/gem story used as the few-shot fixture.
+	_current_premise = LlmPrompts.pick_premise()
+	print("[main] kickoff premise: ", _current_premise)
+	hud.toast("Generating quest...", 4.0)
+	var result: Dictionary = await quest_agent.generate(_current_premise)
+	if not result.get("ok", false):
+		hud.toast("Generation failed: " + String(result.get("error", "")), 5.0)
+		return
+	var bundle: Dictionary = result.bundle
+	QuestSpawner.spawn(bundle, level_root, player, null)
+	if result.get("fallback", false):
+		hud.toast("LLM failed — using fallback fixture", 3.0)
+	else:
+		hud.toast("Quest ready: " + String(bundle.get("quest", {}).get("title","")), 3.0)
 
 func _setup_dialog() -> void:
 	dialog = DialogBox.new()
@@ -545,6 +715,11 @@ func _on_player_interact(target: Node) -> void:
 	_dialog_state = "menu"
 	_dialog_node_id = ""
 	_set_player_locked(true)
+	# Quest-giver NPCs route to the simple-quest LLM flow: ask once,
+	# generate, give intro/active/complete dialog as state advances.
+	if target is NPC and target.has_meta("quest_giver_kind"):
+		await _handle_quest_giver(target as NPC)
+		return
 	# If the NPC has a rich dialog tree, jump straight into it.
 	if target is NPC and not (target as NPC).dialog_tree.is_empty():
 		var npc := target as NPC
@@ -562,7 +737,11 @@ func _on_player_interact(target: Node) -> void:
 	dialog.show_actions(target.get("npc_name"), line, actions)
 
 func _on_dialog_action(action: String) -> void:
-	if _current_npc == null: return
+	print("[main] _on_dialog_action: '", action, "' npc=", _current_npc)
+	if _current_npc == null:
+		# Don't silently swallow clicks — close so the player isn't stuck.
+		dialog.close_dialog()
+		return
 	match action:
 		"Talk":
 			var line: String = _current_npc.dialog_lines[randi() % _current_npc.dialog_lines.size()]
@@ -574,6 +753,20 @@ func _on_dialog_action(action: String) -> void:
 		"Take":
 			_dialog_state = "take"
 			dialog.show_inventory_picker(_current_npc.npc_name + " — take which?", "Pick an item to take", _current_npc.inventory)
+		"Accept", "Bye":
+			dialog.close_dialog()
+		"Path of Honor":
+			if _current_npc is NPC and _current_npc.has_meta("quest_giver_kind") \
+					and String(_current_npc.get_meta("quest_giver_kind")) == "two_stage":
+				_start_stage_two(_current_npc as NPC, LlmPrompts.TWO_STAGE_PATH_A)
+		"Path of Greed":
+			if _current_npc is NPC and _current_npc.has_meta("quest_giver_kind") \
+					and String(_current_npc.get_meta("quest_giver_kind")) == "two_stage":
+				_start_stage_two(_current_npc as NPC, LlmPrompts.TWO_STAGE_PATH_B)
+		_:
+			# Anything else (buttons we didn't pre-register) just closes
+			# the dialog so the player isn't stuck.
+			dialog.close_dialog()
 
 func _on_dialog_item(slot_idx: int) -> void:
 	if _current_npc == null: return
@@ -614,6 +807,48 @@ func _open_dialog_node(node_id: String) -> void:
 	var node: Dictionary = npc.dialog_tree[node_id]
 	var visible := npc.visible_choices(node_id, player, _npc_index())
 	dialog.show_node(npc.npc_name, node, visible)
+	# Prefetch deeper layers in the background so the player rarely waits.
+	_prefetch_expansions(npc, node_id, node)
+
+func _prefetch_expansions(npc: NPC, node_id: String, node: Dictionary) -> void:
+	if quest_agent == null:
+		return
+	for c in node.get("choices", []):
+		if String(c.get("next","")) == "__expand__":
+			var ctx := _build_expand_context(npc, node_id, c)
+			# Fire-and-forget: Godot runs the coroutine; cache holds the result.
+			quest_agent.expand_node(ctx)
+
+func _build_expand_context(npc: NPC, parent_id: String, choice: Dictionary) -> Dictionary:
+	var inv: Array = []
+	for s in player.inventory.slots:
+		if s != null:
+			inv.append(s.id)
+	var qtitle := ""
+	var qdesc := ""
+	var brs: Array = []
+	if not QuestManager.active_quests.is_empty():
+		var q: Quest = QuestManager.active_quests[0]
+		qtitle = q.title
+		qdesc = q.description
+		for b in q.branches:
+			brs.append("%s: %s" % [b.id, b.description])
+	return {
+		"premise": _current_premise,
+		"npc_name": npc.npc_name,
+		"npc_role": npc.role,
+		"character_sheet": npc.character_sheet,
+		"parent_node_id": parent_id,
+		"parent_node_text": String(npc.dialog_tree.get(parent_id, {}).get("text","")),
+		"choice_id": String(choice.get("id","")),
+		"choice_text": String(choice.get("text","")),
+		"choice_hint": String(choice.get("next_hint","")),
+		"quest_title": qtitle,
+		"quest_description": qdesc,
+		"branch_summaries": brs,
+		"player_flags": QuestManager.global_flags.duplicate(),
+		"player_inventory": inv,
+	}
 
 func _on_dialog_choice(choice: Dictionary) -> void:
 	if _current_npc == null or not (_current_npc is NPC):
@@ -629,10 +864,29 @@ func _on_dialog_choice(choice: Dictionary) -> void:
 		dialog.close_dialog()
 		return
 	var nxt: Variant = choice.get("next", null)
-	if nxt == null or String(nxt) == "" or String(nxt) == "end":
+	var nxt_str: String = String(nxt) if nxt != null else ""
+	if nxt_str == "" or nxt_str == "end":
 		dialog.close_dialog()
+	elif nxt_str == "__expand__":
+		await _expand_and_navigate(npc, choice)
 	else:
-		_open_dialog_node(String(nxt))
+		_open_dialog_node(nxt_str)
+
+func _expand_and_navigate(npc: NPC, choice: Dictionary) -> void:
+	# Show a transient "thinking" node while the agent generates.
+	var spinner_node := {"text": "...", "choices": []}
+	dialog.show_node(npc.npc_name, spinner_node, [])
+	var ctx := _build_expand_context(npc, _dialog_node_id, choice)
+	var result: Dictionary = await quest_agent.expand_node(ctx)
+	var new_node: Dictionary = result.get("node", {"text":"...","choices":[]})
+	# Splice into the npc's dialog_tree under a stable id so revisits skip expansion.
+	var new_id: String = "%s__%s" % [_dialog_node_id, String(choice.get("id",""))]
+	npc.dialog_tree[new_id] = new_node
+	choice["next"] = new_id
+	# If dialog closed mid-expansion (e.g. NPC died) — bail.
+	if not dialog.visible or _current_npc != npc:
+		return
+	_open_dialog_node(new_id)
 
 func _run_dialog_action(npc: NPC, action: String) -> void:
 	# action grammar:

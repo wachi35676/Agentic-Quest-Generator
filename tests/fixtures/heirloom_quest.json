@@ -1,0 +1,302 @@
+{
+  "quest": {
+    "id": "stolen_heirloom",
+    "title": "The Stolen Heirloom",
+    "description": "The Elder's red gem was taken by a Bandit camped to the south-west. How you handle it is up to you.",
+    "sequential": false,
+    "objectives": [],
+    "rewards": [],
+    "branches": [
+      {
+        "id": "combat",
+        "description": "Kill the Bandit and return the gem.",
+        "objectives": [
+          {"type":"kill_npc","params":{"npc_name":"Bandit"},"required":1,"description":"Defeat the Bandit"},
+          {"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Give the gem to the Elder"}
+        ],
+        "rewards": [{"item_id":"coin_gold","count":5},{"item_id":"potion_red","count":2}]
+      },
+      {
+        "id": "persuade",
+        "description": "Convince the Bandit to give the gem freely.",
+        "requires_flags": {"persuaded":"true"},
+        "objectives": [
+          {"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Return the gem to the Elder"}
+        ],
+        "rewards": [{"item_id":"coin_gold","count":5},{"item_id":"key_silver","count":1},{"item_id":"potion_red","count":2}]
+      },
+      {
+        "id": "bribe",
+        "description": "Pay the Bandit off and return the gem.",
+        "requires_flags": {"bribed":"true"},
+        "objectives": [
+          {"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Return the gem to the Elder"}
+        ],
+        "rewards": [{"item_id":"coin_gold","count":3},{"item_id":"key_silver","count":1}]
+      },
+      {
+        "id": "side_with_bandit",
+        "description": "Side with the Bandit. Eliminate the Elder.",
+        "requires_flags": {"bandit_ally":"true"},
+        "objectives": [
+          {"type":"kill_npc","params":{"npc_name":"Elder"},"required":1,"description":"Eliminate the Elder"}
+        ],
+        "rewards": [{"item_id":"axe","count":1},{"item_id":"gem_red","count":2},{"item_id":"coin_silver","count":3}]
+      },
+      {
+        "id": "trade_food",
+        "description": "Trade food to the Bandit and return the gem.",
+        "requires_flags": {"traded_food":"true"},
+        "objectives": [
+          {"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Return the gem to the Elder"}
+        ],
+        "rewards": [{"item_id":"coin_gold","count":4},{"item_id":"key_silver","count":1},{"item_id":"meat","count":2}]
+      },
+      {
+        "id": "intimidate",
+        "description": "Threaten the Bandit at swordpoint and return the gem.",
+        "requires_flags": {"intimidated":"true"},
+        "objectives": [
+          {"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Return the gem to the Elder"}
+        ],
+        "rewards": [{"item_id":"coin_gold","count":4}]
+      },
+      {
+        "id": "mediate",
+        "description": "Reconcile the Elder and the Bandit. Return the gem with the truth.",
+        "requires_flags": {"mediated":"true"},
+        "objectives": [
+          {"type":"give","params":{"npc_name":"Elder","item_id":"gem_red"},"required":1,"description":"Return the gem to the Elder"}
+        ],
+        "rewards": [{"item_id":"coin_gold","count":8},{"item_id":"key_gold","count":1},{"item_id":"medipack","count":1},{"item_id":"potion_red","count":2}]
+      }
+    ],
+    "fail_conditions": [
+      {"type":"kill_npc","params":{"npc_name":"Elder"},"required":1,"description":"Killed the Elder"}
+    ]
+  },
+  "npcs": [
+    {
+      "npc_name": "Elder",
+      "character_sheet": "OldMan",
+      "role": "elder",
+      "position_hint": "ne",
+      "max_health": 3,
+      "initial_items": [{"id":"coin_gold","count":2},{"id":"key_silver","count":1}],
+      "dialog_start": "start_intro",
+      "start_nodes": [
+        {"node":"start_done",       "requires":{"quest:stolen_heirloom":"completed"}},
+        {"node":"start_failed",     "requires":{"quest:stolen_heirloom":"failed"}},
+        {"node":"start_has_gem",    "requires":{"quest:stolen_heirloom":"active","inv:gem_red":">=1"}},
+        {"node":"start_in_progress","requires":{"quest:stolen_heirloom":"active","flag:elder_briefed":"true"}},
+        {"node":"start_intro",      "requires":{"quest:stolen_heirloom":"active"}}
+      ],
+      "dialog_tree": {
+        "start_intro": {
+          "text": "The old man's eyes water as you approach. \"Stranger... thank the heavens. My family's heirloom — a red gem older than this village — has been stolen. A bandit has been camping to the south-west, drinking himself stupid on what he can rob from travelers. He took it three nights past while I slept. Please... I have not the strength left to fetch it myself.\"",
+          "choices": [
+            {"id":"accept","text":"I'll find your gem. You have my word.","actions":["set_flag:elder_briefed=true"],"next":"intro_accept"},
+            {"id":"ask_pay","text":"What's in it for me?","next":"intro_payment"},
+            {"id":"refuse","text":"Find someone else.","next":"intro_refuse"}
+          ]
+        },
+        "intro_payment": {
+          "text": "\"I am not a wealthy man, but I have set aside a purse of gold for whoever returns my gem. Take it as recompense for the trouble — and ask not how an old man came by it.\"",
+          "choices": [
+            {"id":"accept_after_pay","text":"Then I'll fetch it.","actions":["set_flag:elder_briefed=true"],"next":"intro_accept"},
+            {"id":"refuse_after_pay","text":"Not enough.","next":"intro_refuse"}
+          ]
+        },
+        "intro_refuse": {
+          "text": "\"Then go in peace. May you sleep more soundly than I do tonight.\"",
+          "choices": []
+        },
+        "intro_accept": {
+          "text": "\"Bless you. The bandit's camp is to the south-west — you can't miss the smoke. Try... try not to start a fire if there is another way. He was a good man, once.\"",
+          "choices": []
+        },
+        "start_in_progress": {
+          "text": "\"Back already? Without the gem? The bandit is to the SOUTH-WEST, friend. Mind the brambles.\"",
+          "choices": [
+            {"id":"reassure","text":"I'll find it. I just needed a moment.","next":"end"},
+            {"id":"vent","text":"That bandit is more trouble than he looks.","next":"vent_reply"},
+            {"id":"confront","text":"He says the gem belonged to his mother. Is that true?","requires":{"flag:bandit_sympathy":"true"},"next":"confront_response"}
+          ]
+        },
+        "confront_response": {
+          "text": "The Elder is silent a long while. His mouth works without sound. \"...So he told you. I had hoped he'd forgotten. I won that gem from his mother in a fool's wager when she was sick and out of coin and could not refuse the table. I have carried that shame these forty years. It IS his by blood. But it is also all I have left of her — she was a friend to me, before. Whatever you do with this knowledge, do it kindly.\"",
+          "choices": [
+            {"id":"will_mediate","text":"Then let me try to set this right between you.","actions":["set_flag:elder_confessed=true"],"next":"mediate_blessing"},
+            {"id":"will_take","text":"You don't deserve it. I'll take it to him.","actions":["set_flag:elder_confessed=true"],"next":"angry_dismiss"},
+            {"id":"shrug","text":"That's between you two. (leave)","next":"end"}
+          ]
+        },
+        "mediate_blessing": {
+          "text": "The Elder bows his head. \"Then you carry more than a gem. Tell him... tell him I'm sorry. I should have said it forty years ago.\"",
+          "choices": []
+        },
+        "angry_dismiss": {
+          "text": "\"Fair. I'll not stop you.\" His eyes do not meet yours.",
+          "choices": []
+        },
+        "vent_reply": {
+          "text": "\"Aye. He always was a slippery one, even as a boy. If words won't move him, perhaps a sharper tongue will.\"",
+          "choices": []
+        },
+        "start_has_gem": {
+          "text": "The Elder's eyes widen. \"You have it. By the saints — you actually have it. Hand it here, hand it here, my hands are shaking...\"",
+          "choices": [
+            {"id":"hand_gem","text":"(Hand over the gem.)","actions":["take_player:gem_red"],"next":"end"},
+            {"id":"keep_it","text":"Hmm... actually, this gem is rather pretty.","next":"keep_response"}
+          ]
+        },
+        "keep_response": {
+          "text": "\"You wouldn't. You promised. ...You promised.\"",
+          "choices": [
+            {"id":"return_it","text":"You're right. (Return to handing it over.)","next":"start_has_gem"},
+            {"id":"walk_away","text":"(walk away)","next":"end"}
+          ]
+        },
+        "start_done": {
+          "text": "\"My friend. Sit, sit. The gem is on its altar again, where it belongs. Whatever you did out there — I will not ask. Some debts are paid in silver, but yours is paid in something I cannot put a name to.\"",
+          "choices": []
+        },
+        "start_failed": {
+          "text": "(There is no answer. The Elder is gone.)",
+          "choices": []
+        }
+      }
+    },
+    {
+      "npc_name": "Bandit",
+      "character_sheet": "Hunter",
+      "role": "bandit",
+      "position_hint": "sw",
+      "max_health": 4,
+      "initial_items": [{"id":"gem_red","count":1},{"id":"coin_gold","count":1}],
+      "dialog_start": "start_unbriefed",
+      "start_nodes": [
+        {"node":"start_mediated","requires":{"flag:mediated":"true"}},
+        {"node":"start_post_deal","requires":{"flag:persuaded":"true"}},
+        {"node":"start_post_deal","requires":{"flag:bribed":"true"}},
+        {"node":"start_post_food","requires":{"flag:traded_food":"true"}},
+        {"node":"start_post_intimidated","requires":{"flag:intimidated":"true"}},
+        {"node":"start_post_ally","requires":{"flag:bandit_ally":"true"}},
+        {"node":"start_briefed","requires":{"flag:elder_briefed":"true"}},
+        {"node":"start_unbriefed","requires":{}}
+      ],
+      "dialog_tree": {
+        "start_unbriefed": {
+          "text": "A wiry man slouches against a half-burnt tree, knife in his lap. He doesn't bother standing. \"You're a long way from anywhere, friend. Either you're lost, or you're nosy, and either way it's a problem for one of us.\"",
+          "choices": [
+            {"id":"who_are_you","text":"Who are you?","next":"who_reply"},
+            {"id":"leave_unbriefed","text":"My mistake. (leave)","next":"end"}
+          ]
+        },
+        "who_reply": {
+          "text": "\"Names are for tax collectors. Folks around here just call me trouble. Now, was there something you wanted, or did you come to admire the view?\"",
+          "choices": [
+            {"id":"leave_uncurious","text":"Just passing through.","next":"end"}
+          ]
+        },
+        "start_briefed": {
+          "text": "The Bandit recognises you. \"Ah. The old man finally got someone to do his fetching for him, did he? I wondered when this little drama would reach me. Get to the point — what's it going to be?\"",
+          "choices": [
+            {"id":"ask_gem","text":"The red gem. I want it back.","next":"ask"},
+            {"id":"ally_offer","text":"What if I weren't on his side?","next":"ally"},
+            {"id":"why_take","text":"Why did you steal it in the first place?","next":"backstory"},
+            {"id":"leave_briefed","text":"I've heard enough. (leave)","next":"end"}
+          ]
+        },
+        "backstory": {
+          "text": "He laughs, dry as dust. \"Steal? That gem belonged to my mother before that old crow ever set eyes on it. He won it off her in a card game when I was a boy and her hands were too tired to count. So no, I didn't steal it. I took it back.\"",
+          "choices": [
+            {"id":"believe","text":"...That changes things.","actions":["set_flag:bandit_sympathy=true"],"next":"backstory_after"},
+            {"id":"disbelieve","text":"Convenient story.","next":"ask"}
+          ]
+        },
+        "backstory_after": {
+          "text": "\"Good of you to listen. Doesn't change what you came for, though. Make your choice.\"",
+          "choices": [
+            {"id":"ask_gem2","text":"I still need the gem.","next":"ask"},
+            {"id":"ally_offer2","text":"Maybe the old man's the one who should answer for this.","next":"ally"}
+          ]
+        },
+        "ask": {
+          "text": "\"So you want the red rock. Course you do. Well, I'm a reasonable sort, when the wind's right. Pick a wind.\"",
+          "choices": [
+            {"id":"persuade_honest","text":"He's a frail old man. Just return it — call it a kindness.","actions":["set_flag:persuaded=true","give_player:gem_red"],"next":"honest_out"},
+            {"id":"persuade_bribe","text":"I can pay you a coin for it.","actions":["take_player:coin_gold","set_flag:bribed=true","give_player:gem_red"],"next":"bribe_out"},
+            {"id":"threaten_sword","text":"[draw blade] You can hand it over, or I can take it.","requires":{"inv:sword":">=1"},"actions":["set_flag:intimidated=true","give_player:gem_red"],"next":"intimidated_out"},
+            {"id":"trade_fish","text":"I have fish to spare. Trade?","requires":{"inv:fish":">=1"},"actions":["take_player:fish","set_flag:traded_food=true","give_player:gem_red"],"next":"food_out"},
+            {"id":"trade_meat","text":"How about a hot meal? I have meat.","requires":{"inv:meat":">=1"},"actions":["take_player:meat","set_flag:traded_food=true","give_player:gem_red"],"next":"food_out"},
+            {"id":"trade_honey","text":"Sweet tooth? I have honey.","requires":{"inv:honey":">=1"},"actions":["take_player:honey","set_flag:traded_food=true","give_player:gem_red"],"next":"food_out"},
+            {"id":"deliver_truth","text":"The Elder confessed. He's sorry. He said he should have said so forty years ago.","requires":{"flag:bandit_sympathy":"true","flag:elder_confessed":"true"},"actions":["set_flag:mediated=true","give_player:gem_red"],"next":"mediate_out"},
+            {"id":"insult","text":"Hand it over before I make you.","next":"insult_out"},
+            {"id":"back","text":"(say nothing — step back)","next":"start_briefed"}
+          ]
+        },
+        "intimidated_out": {
+          "text": "He weighs his knife against your steel and decides he likes his hand the way it is. Spits, pulls the gem from his belt, and slings it at your feet. \"Take it. Walk away. Don't ever come back here.\"",
+          "choices": []
+        },
+        "food_out": {
+          "text": "He blinks at the offering, then laughs — short and surprised. \"You've a strange way of bargaining.\" He eats. He chews. He hands you the gem. \"For the meal. Wasn't expecting kindness today.\"",
+          "choices": []
+        },
+        "mediate_out": {
+          "text": "He stares at you. The smirk leaves his face for the first time. \"He said that? After all this time?\" He turns the gem over once, twice, then presses it into your hand. \"Take it back to him. Tell him... tell him I heard. And tell him my mother forgave him long before I was old enough to understand.\"",
+          "choices": []
+        },
+        "honest_out": {
+          "text": "He stares at you a long moment, then snorts and tosses you the gem. \"Tell the old fool he doesn't deserve you. And tell him we're square.\"",
+          "choices": []
+        },
+        "bribe_out": {
+          "text": "He bites the coin, grins yellow, and presses the gem into your palm. \"Pleasure doing business. The old man's a piece of work, but coin spends the same.\"",
+          "choices": []
+        },
+        "insult_out": {
+          "text": "His grin goes flat. \"Then we'll see whose hands shake first.\" He doesn't give you the gem. (Draw your sword if you mean it.)",
+          "choices": []
+        },
+        "ally": {
+          "text": "He tilts his head. \"Now THAT is interesting. You think the old crow has it coming, do you? Tell you what — you put him in the ground, and the gem's yours, plus a bit extra. He's got things in that hut of his I'd rather not chase down myself.\"",
+          "choices": [
+            {"id":"ally_accept","text":"You have a deal.","actions":["set_flag:bandit_ally=true"],"next":"ally_accepted"},
+            {"id":"ally_decline","text":"On reflection, no. (back)","next":"start_briefed"}
+          ]
+        },
+        "ally_accepted": {
+          "text": "\"Find me when it's done. Don't make me wait — patience and I parted ways years ago.\"",
+          "choices": []
+        },
+        "start_post_deal": {
+          "text": "He nods at you with something almost like respect. \"Still breathing. Good. Go on — the old man's waiting.\"",
+          "choices": []
+        },
+        "start_post_ally": {
+          "text": "\"Is it done? Don't make me ask twice.\"",
+          "choices": [
+            {"id":"not_yet","text":"Not yet.","next":"end"}
+          ]
+        },
+        "start_post_food": {
+          "text": "He raises a finger in mock salute. \"Decent traveler. Rare these days. Now leave me to my fire.\"",
+          "choices": []
+        },
+        "start_post_intimidated": {
+          "text": "He doesn't look up. \"Move along.\"",
+          "choices": []
+        },
+        "start_mediated": {
+          "text": "The bandit looks lighter than when you met him. \"Strange feeling, this. Forty years of cold smoke, and you blow it away in an afternoon. Go on, then. He's waiting for you.\"",
+          "choices": []
+        }
+      }
+    }
+  ],
+  "items": [
+    {"id":"sword","position_hint":"near_player"}
+  ]
+}
