@@ -458,6 +458,84 @@ Five continuations max per quest. Empty new chapters get rejected (the most comm
 
 ---
 
+## Evaluation
+
+The project ships with a fully-automated evaluation harness. It computes five paper-style metrics over batches of headless game sessions where a **scripted player** drives the world end-to-end — no human input, no gameplay required. Everything lives under `tools/eval/`.
+
+### What it measures
+
+```mermaid
+flowchart LR
+    A[Godot game] -->|writes 1 line per event| B[user://eval/&lt;id&gt;.jsonl]
+    A -->|exports catalog| C[user://eval/entities.json]
+    B --> D[tools/eval/runner.py]
+    C --> D
+    D --> E[results.json + results.csv + summary.json]
+```
+
+| # | Metric | What it answers |
+|---|---|---|
+| 1 | **Structural Adherence** | Does the LLM output parse and pass schema validation? |
+| 2 | **Accuracy of Given Strings** | Are NPC names, item ids, character sheets, and position hints all real (in the closed catalog)? |
+| 3 | **Adaptation Rate** | How many continuation chapters the orchestrator fires per hour of play. |
+| 4 | **Memory Consistency** | When the Wanderer references past actions, are they actually in the action ledger? |
+| 5 | **Replanning Latency** | Wall-clock ms from `[Report]` click to a usable new chapter. |
+
+Memory consistency uses **structured claims** ("Option A"): the orchestration prompt asks the LLM to optionally emit `memory_claims: [{kind, params}]` alongside its dialog. The engine deterministically subset-matches each claim against the action ledger and tags it `verified: true|false`.
+
+### Scripted player profiles
+
+Four deterministic state machines drive the player. They emit dialog signals directly (`dialog.action_chosen.emit("Yes")`) and call `Player.scripted_set_velocity / scripted_attack / scripted_interact` — no fake input events. A stuck-detector with perpendicular sidesteps (~0.8s commit) handles the village walls.
+
+| Profile | Behaviour |
+|---|---|
+| `aggressive` | Walks to nearest LLM-spawned NPC, attacks until dead. Reports back. Repeats. |
+| `cautious` | Talks to each LLM NPC once (first non-`end` choice), never attacks, then reports. |
+| `explorer` | Cycles `talk → give → kill` across distinct NPCs, reports between cycles. |
+| `completionist` | Talks to every NPC twice, gives one item, kills the villain-role NPC, reports. |
+
+Sessions end when the profile's chapter cap is hit, or after a 5-min hard wall-clock cap, or 30s of no progress (stuck), or whenever the orchestrator decides to close the quest.
+
+### How to run
+
+```bash
+# Smoke test — 8 sessions (~5-15 min)
+N=2 bash tools/eval/run_all.sh
+
+# Full run — 60 sessions (4 profiles × 15)
+bash tools/eval/run_all.sh
+```
+
+PowerShell equivalent: `.\tools\eval\run_all.ps1`. Outputs land in `tools/eval/results/{results.json, results.csv, summary.json}` and raw event streams in `tools/eval/sessions/`. Re-aggregate without re-playing via `python tools/eval/runner.py --in tools/eval/sessions --out tools/eval/results --entities tools/eval/entities.json`.
+
+### Sample results (smoke run, N=1 across all four profiles)
+
+These are the numbers from a small initial run — useful as ground-truth that the harness works, not as a paper-ready dataset. Across **7 sessions** (some early ones aborted before reaching the Wanderer; later ones reached him after the stuck-detector fix):
+
+| Metric | Value | Notes |
+|---|---|---|
+| **Structural pass rate** | **1.00** | Every quest that survived parsing also passed full schema validation. |
+| **Parse rate** | 1.00 | No malformed JSON ever escaped the brace-counting extractor. |
+| **Avg generation attempts** | 1.5 | Most bundles validate first try; sanitizer + repair loop handles the rest. |
+| **Avg sanitizer fixes / bundle** | ~12 | Casing, ASCII-cleaning, NPC duplicates, etc. Load-bearing — without these, validation rate drops to ~0. |
+| **String accuracy** | **1.00** | Across post-sanitize bundles, every NPC / item / sheet / position-hint reference resolves. |
+| **Replanning latency (median)** | **4.5 s** | One sample. Groq's LPU keeps it tight. |
+| **Replanning latency (p95)** | 22.9 s | Long tail dominated by occasional repair-loop retries. |
+| **Adaptation rate** | 0 / hr | No continuations completed in the smoke run — sessions were too short. The instrumentation is wired (the `replan_triggered` / `replan_completed` signals fire), but to populate this metric we need longer runs. |
+| **Memory consistency** | n/a | The 70b model didn't emit any `memory_claims` in this small run. The prompt instruction is in place; expect non-trivial counts once continuations land. |
+
+Full per-session breakdown lives in `tools/eval/results/results.csv`. The aggregator skips `null` cells (sessions that ended before producing the relevant metric), so each metric's `n` reports how many sessions actually contributed.
+
+### Reading the event stream
+
+Every session produces one `.jsonl` file in `user://eval/`. Each line is a single event:
+
+```json
+{"agent":"QuestGenAgent","event_type":"quest_generated","payload":{"phase":"branching","parsed_ok":true,"schema_valid":true,"sanitizer_fix_count":13,"attempt":1,"quest_id":"the_missing_gem","npc_count":4,"branch_count":4,"model":"llama-3.3-70b-versatile","elapsed_ms":14469,"raw_text_len":11592},"session_id":"20260428_011546_aggressive","timestamp_ms":23978}
+```
+
+Event types emitted: `session_start`, `quest_generated`, `quest_revised`, `replan_triggered`, `replan_completed`, `player_action`, `memory_claim`, `orchestration_complete`, `orchestration_failed`, `session_end`. Schemas live in `scripts/evaluation_logger.gd` callsites; the runner reads them with permissive `.get(key, default)` so adding new payload fields doesn't break old sessions.
+
 ## Running the project
 
 You need:
