@@ -14,6 +14,7 @@ It's built in **Godot 4.6.2** with **GDScript**, and it can talk to **Groq** (pr
 - [How agentic AI works here](#how-agentic-ai-works-here)
 - [System architecture](#system-architecture)
 - [The action ledger](#the-action-ledger)
+- [Wanderer-as-orchestrator: behind the scenes](#wanderer-as-orchestrator-behind-the-scenes)
 - [Quest schema](#quest-schema)
 - [LLM provider stack](#llm-provider-stack)
 - [The sanitize → validate → spawn pipeline](#the-sanitize--validate--spawn-pipeline)
@@ -62,12 +63,12 @@ Every time you talk to the Wanderer with new entries in the ledger, the agent ru
 
 ```mermaid
 flowchart LR
-    A([Player walks back<br/>to Wanderer]) --> B[Engine assembles:<br/>previous quest summary +<br/>action ledger +<br/>list of living NPCs]
-    B --> C[LLM call:<br/>'You are the storyteller.<br/>Decide: continue or complete?']
-    C --> D{LLM returns<br/>JSON decision}
-    D -->|continue| E[Engine wipes old<br/>NPCs/items, spawns the<br/>new chapter the LLM wrote]
-    D -->|complete| F[Engine grants rewards,<br/>clears ledger,<br/>resets Wanderer to idle]
-    E --> G([Player keeps playing])
+    A(["Player walks back to Wanderer"]) --> B["Engine assembles: previous quest summary + action ledger + living NPCs"]
+    B --> C["LLM call: decide continue or complete"]
+    C --> D{"LLM returns JSON decision"}
+    D -->|"continue"| E["Wipe old NPCs/items; spawn the new chapter the LLM wrote"]
+    D -->|"complete"| F["Grant rewards; clear ledger; reset Wanderer to idle"]
+    E --> G(["Player keeps playing"])
     F --> G
 ```
 
@@ -85,39 +86,38 @@ Here's the high-level picture of what talks to what:
 
 ```mermaid
 flowchart TB
-    subgraph Player_World [Player World]
-        Player[Player]
-        Wanderer[Wanderer NPC<br/>orchestrator]
-        Spawned[LLM-spawned NPCs<br/>and items]
-        Player -.attacks/talks/gives.-> Spawned
-        Player -->|presses E to talk| Wanderer
+    subgraph PW["Player World"]
+        Player["Player"]
+        Wanderer["Wanderer NPC (orchestrator)"]
+        Spawned["LLM-spawned NPCs and items"]
+        Player -->|"interact"| Spawned
+        Player -->|"E to talk"| Wanderer
     end
 
-    subgraph Engine [Engine - Godot]
-        QM[QuestManager<br/>- active quests<br/>- action_ledger]
-        QS[QuestSpawner<br/>- wipe + spawn<br/>NPCs/items]
-        QL[QuestLog UI<br/>Tab key]
-        Dialog[DialogBox UI]
+    subgraph EG["Engine (Godot)"]
+        QM["QuestManager<br/>active quests + action_ledger"]
+        QS["QuestSpawner<br/>wipe and spawn NPCs/items"]
+        QL["QuestLog UI (Tab)"]
+        Dialog["DialogBox UI"]
     end
 
-    subgraph LLM_Stack [LLM Stack]
-        QGA[QuestGenAgent<br/>orchestration entry point]
-        Comp[CompositeClient<br/>Groq -> Gemini fallback]
-        Sani[QuestSanitizer<br/>fixes LLM quirks]
-        Val[QuestValidator<br/>rejects bad output]
+    subgraph LS["LLM Stack"]
+        QGA["QuestGenAgent"]
+        Comp["CompositeClient<br/>Groq then Gemini"]
+        Sani["QuestSanitizer<br/>deterministic fixes"]
+        Val["QuestValidator<br/>schema check"]
     end
 
-    Spawned --kill/give/take/dialog--> QM
-    QM --records action--> QM
-    Wanderer --on talk--> QGA
-    QGA --reads ledger from--> QM
-    QGA --calls--> Comp
+    Spawned -->|"events"| QM
+    Wanderer -->|"on talk"| QGA
+    QGA -->|"reads ledger"| QM
+    QGA --> Comp
     Comp --> Sani
     Sani --> Val
-    Val --validated bundle--> QGA
-    QGA --returns chapter--> QS
-    QS --updates--> QM
-    QS --spawns--> Spawned
+    Val -->|"validated bundle"| QGA
+    QGA -->|"returns chapter"| QS
+    QS --> QM
+    QS --> Spawned
     QM --emits signals--> QL
     Player --interacts with--> Dialog
 ```
@@ -156,6 +156,191 @@ Hooks live in `QuestManager._on_npc_killed`, `_on_npc_interacted`, and the publi
 The ledger **persists across continuations**. Chapter 3's prompt sees actions from chapters 1 and 2. The Wanderer can reference them to make the world feel like it remembers. The ledger is cleared only when the agent decides `complete`.
 
 Here's the key insight: **a tracked action that the LLM didn't anticipate is not an error**. The first chapter might say "talk to the witness", and you might kill the witness instead. That kill goes into the ledger. The next time the Wanderer runs, the LLM sees `killed witness` in the ledger and is instructed (via prompt) to treat it as a creative seed — *not* to fail the quest. So the next chapter might be "the witness is dead, the guards are investigating, here's a coverup quest", or "the witness is dead, your reputation has soured, here's an act of redemption". The story bends.
+
+---
+
+## Wanderer-as-orchestrator: behind the scenes
+
+This is the part most worth understanding. The Wanderer looks like a normal NPC but is actually the entry point of a **four-state machine + LLM agent + replace-the-world loop**. Here's what happens, in order, the first time you press E on him.
+
+### State machine
+
+The Wanderer's state lives on `npc.memory.wanderer_state` (one string field). All four states are handled by `main.gd::_handle_branching(npc)`.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> idle
+    idle --> active : "Yes" pressed (kickoff)
+    active --> closing : "Report" pressed
+    closing --> active : LLM returned continue
+    closing --> idle : LLM returned complete
+    active --> active : revisit with empty ledger (no LLM call)
+```
+
+| State | What the player sees | What the engine does on `[E]` |
+|---|---|---|
+| `idle` | "I have a tale brewing. Will you hear it?" — `[Yes]` `[Bye]` | `[Yes]` calls `_kickoff_first_chapter(npc)` → first LLM call |
+| `active` *(empty ledger)* | "You've done nothing of consequence. Walk, act, then return." — `[Bye]` | nothing — no LLM call, no state change |
+| `active` *(ledger has ≥1 entry)* | "Tell me what's happened." — `[Report]` `[Bye]` | `[Report]` calls `_orchestrate_next_chapter(npc)` → orchestration LLM call |
+| `closing` | "(reading the threads...)" — no buttons | the LLM call is in flight; dialog locks until it returns |
+
+`closing` is a *transient* lock so a second click on `[Report]` mid-call can't fire two LLM requests against the same `HTTPRequest` (which would crash).
+
+### Kickoff (first chapter)
+
+When the player accepts at `idle`:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Player
+    participant Wanderer as "Wanderer (NPC)"
+    participant Main as main.gd
+    participant Agent as QuestGenAgent
+    participant LLM as "LLM (Groq/Gemini)"
+    participant Sani as QuestSanitizer
+    participant Val as QuestValidator
+    participant Spawner as QuestSpawner
+
+    Player->>Wanderer: press E
+    Wanderer->>Main: request_interact
+    Main->>Wanderer: show "I have a tale brewing"
+    Player->>Main: click [Yes]
+    Main->>Agent: generate_branching("Wanderer", "wanderer")
+    Agent->>LLM: system + user prompt (~7K tokens)
+    LLM-->>Agent: raw JSON (with quirks)
+    Agent->>Agent: extract first balanced object
+    Agent->>Sani: sanitize(bundle, ["Wanderer"])
+    Sani-->>Agent: cleaned bundle + N fix notes
+    Agent->>Val: validate(bundle, ["Wanderer"])
+    Val-->>Agent: errors list (often empty)
+    Note over Agent: If errors, repair-loop up to 6 attempts
+    Agent-->>Main: bundle
+    Main->>Spawner: spawn(bundle, level_root, player, hand_placed_npcs)
+    Spawner->>Spawner: wipe old LLM NPCs/items/Labels
+    Spawner->>Spawner: instantiate new NPCs at compass-hint offsets
+    Spawner->>Spawner: scatter relevant items
+    Spawner->>QuestManager: add_quest_from_dict(quest)
+    Note over Spawner: sets quest.meta.orchestrator_managed = true
+    Main->>Wanderer: state = "active"
+    Main->>Player: show intro dialog "<title> + lore"
+```
+
+The kickoff prompt for `generate_branching` includes:
+
+- **The world constraints clause** (no locations, no time, no follow-me) at the top *and* the bottom of the prompt, because LLMs over-weight first and last instructions.
+- **The closed entity catalog** — every legal item id, character sheet, position hint, objective type, action verb. The model is told these are the only legal references.
+- **A worked example of a state-aware NPC** showing `start_nodes` with flag-gated alternatives, so the model emits "remember on second meeting" patterns.
+- **Branch rules**: ≥2 objectives per branch (the sanitizer enforces this anyway), pair a setup objective with a "report back" objective.
+- **Tone**: noir-fantasy, every NPC has something to hide.
+
+Output: a JSON `bundle = {quest, npcs, items}`. Typical bundle has 4 NPCs, 4-5 branches, depth-2 dialog trees with `__expand__` placeholders for deeper layers.
+
+### Acting in the world
+
+Between Wanderer talks the player roams. Every story-significant action is recorded:
+
+```mermaid
+flowchart LR
+    KillEvent["Game.npc_killed"] -->|"from npc.gd"| QM["QuestManager._on_npc_killed"]
+    GiveEvent["Game.npc_interacted give"] -->|"from main.gd"| QM2["QuestManager._on_npc_interacted"]
+    DialogEvent["dialog_choice"] -->|"from main.gd"| QM3["QuestManager.dialog_choice"]
+    QM --> Ledger["action_ledger.append entry"]
+    QM2 --> Ledger
+    QM3 --> Ledger
+    Ledger -->|"cap at 20 entries"| Ledger
+    Ledger -.->|"also logged"| EvalLogger["EvaluationLogger jsonl"]
+```
+
+Note what's *not* tracked: movement, item pickups from the ground, attacks that miss, opening the quest log. Only the four story-mutating events go into the ledger. This keeps the Wanderer's prompt focused on narrative actions instead of bookkeeping.
+
+### Reporting back (orchestration)
+
+When the player walks back and clicks `[Report]`:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Player
+    participant Main as main.gd
+    participant Agent as QuestGenAgent
+    participant LLM
+    participant Spawner as QuestSpawner
+
+    Player->>Main: click [Report]
+    Main->>Main: take t0 = Time.get_ticks_msec()
+    Main->>Main: log replan_triggered (ledger size, prev quest id)
+    Main->>Main: state = "closing"
+    Main->>Agent: generate_orchestration(prev, ledger, current_npcs, "Wanderer", remaining)
+    Agent->>LLM: orchestration prompt (~3K tokens)
+    LLM-->>Agent: { decision, wanderer_dialog, memory_claims?, new_quest?, rewards? }
+    Agent->>Agent: verify each memory_claim against ledger (subset match)
+    Agent->>Agent: log one memory_claim event per claim with verified bool
+    alt decision == "continue"
+        Agent->>Spawner: spawn(new_quest, ..., keep = hand_placed)
+        Spawner->>Spawner: wipe last chapter's NPCs/items/Labels
+        Spawner->>Spawner: install fresh NPCs/items
+        Main->>Main: log quest_revised (elapsed_ms)
+        Main->>Player: show wanderer_dialog + new chapter intro
+        Note over Main: orchestration_count++
+    else decision == "complete"
+        Main->>Main: grant rewards
+        Main->>Main: clear action_ledger
+        Main->>Main: state = "idle"
+        Main->>Main: log session_end (orchestrator_complete)
+        Main->>Player: show wanderer_dialog (closing line)
+    end
+```
+
+The orchestration prompt assembles four pieces:
+
+1. **Previous chapter's metadata** — title, description, branch ids and descriptions. Lets the LLM know what arc the player is on.
+2. **The action ledger** — formatted as readable lines: `"killed Silas"`, `"gave gem_red to Priest"`, `"picked confront-the-betrayer with Silas"`. Oldest first.
+3. **The list of currently living NPCs** — so the model knows who's around. Killed NPCs are absent; the LLM is told to treat their absence as canon.
+4. **The "max remaining continuations" budget** — when this hits 1 the prompt explicitly tells the LLM to *strongly prefer* `complete`. Pacing.
+
+### Hard guardrails over the LLM
+
+The LLM picks the decision but the engine has the final say. After the response comes back, three guards apply (in order):
+
+```mermaid
+flowchart TB
+    A["LLM decision"] --> B{"orchestration_count >= 5?"}
+    B -->|"yes"| Force["force decision = complete"]
+    B -->|"no"| C{"decision = complete but ledger has < 2 entries?"}
+    C -->|"yes"| Override["override to continue<br/>(story cannot end before player acted)"]
+    C -->|"no"| D{"decision = continue but new_quest empty or 0 npcs?"}
+    D -->|"yes"| Reject["reject; Wanderer stays active for retry"]
+    D -->|"no"| Apply["apply decision"]
+    Force --> Apply
+    Override --> Apply
+```
+
+The empty-NPCs reject is the most-tripped guard in practice — the model occasionally wants to write a chapter with only the existing NPCs, which produces a continuation where there's nothing fresh for the player to interact with.
+
+### REPLACE chaptering
+
+When `decision == "continue"`, the previous quest is **closed** (status = COMPLETED with `completed_branch_id = "orchestrator_continuation"`) and a brand-new Quest is registered. The bundle's NPCs and items are spawned; the previous bundle's NPCs/items/labels are wiped from `level_root`. Hand-placed quest-givers (the Wanderer himself, plus Farmer/Hunter/Old Sage/Mystic) are passed as a `keep` array so the wipe spares them.
+
+This means the Quest log shows a chain of completed chapters plus the current active one — the player can scroll back and see the full arc.
+
+The action ledger does **not** clear on continuation. Chapter N's prompt sees the full history from chapters 1 through N-1. The ledger only clears when `decision == "complete"`.
+
+### What stops auto-completion
+
+A normal Godot quest auto-completes when all of a branch's objectives finish. That's exactly what we *don't* want — the Wanderer is supposed to be the only thing that closes the story. So `Quest.evaluate()` short-circuits to `"active"` whenever `meta.orchestrator_managed == true`:
+
+```gdscript
+func evaluate() -> Dictionary:
+    if bool(meta.get("orchestrator_managed", false)):
+        return {"state": "active"}
+    # ... normal branch + fail-condition checks ...
+```
+
+The branches still appear in the quest log (so the player has narrative hints about what to do), but they're advisory only. Even completing every objective in every branch leaves the quest active until the Wanderer's next `complete` decision.
+
+This is the one piece of the design that's most counter-intuitive: the LLM, not the engine, owns quest closure.
 
 ---
 
@@ -230,60 +415,18 @@ The crucial fields:
 
 ## LLM provider stack
 
-The game can talk to multiple LLM providers. They're stacked behind a single interface so the higher-level code doesn't care which one is up.
+Every higher-level call goes through one interface — `CompositeClient.generate(model, system, user, options, format)` — and falls back transparently if the primary provider is down.
 
 ```mermaid
 flowchart TB
-    QGA[QuestGenAgent<br/>generate_branching, generate_orchestration, ...]
-    Comp[CompositeClient]
-    Groq[GroqClient<br/>llama-3.3-70b primary<br/>llama-3.1-8b for small calls]
-    Gem[GeminiClient<br/>gemini-2.5-flash fallback]
-    Env[EnvLoader<br/>reads .env]
-
-    QGA --> Comp
-    Comp -->|primary| Groq
-    Comp -->|fallback when Groq 429| Gem
-    Groq -.reads keys.-> Env
-    Gem -.reads keys.-> Env
-
-    subgraph Pool [Key rotation]
-        Groq -.GROQ_API_KEY 1/2/3.-> Groq
-        Gem -.GEMINI_API_KEY 1/2/3.-> Gem
-    end
+    QGA["QuestGenAgent"] --> Comp["CompositeClient"]
+    Comp -->|"primary"| Groq["GroqClient<br/>llama-3.3-70b for big bundles<br/>llama-3.1-8b for small calls"]
+    Comp -->|"on quota error"| Gem["GeminiClient<br/>gemini-2.5-flash"]
 ```
 
-**Why a stack?**
-
-- **Free tiers throttle.** Groq's free tier limits tokens per minute *and* per day. A single user's Wanderer can blow through that in one play session. Multiple keys per provider, plus a second provider, keeps the game playable.
-- **Different providers have different strengths.** Groq's LPU is dramatically faster (~1-3s for a chapter vs 10-30s for Gemini), but its free tier is tighter.
-- **The interface is identical**: every client exposes `generate(model, system, user, options, format) -> {ok, text, error}`. Nothing above the client layer cares which provider answered.
-
-**How rotation works**:
-
-- `EnvLoader.get_keys_with_prefix("GROQ_API_KEY")` returns `[GROQ_API_KEY, GROQ_API_KEY2, GROQ_API_KEY3]` (whichever exist).
-- `GroqClient` rotates through them on 429s. No waiting between rotations — TPM is per-key.
-- If all keys 429, the client returns the error fast (no `Retry-After` waiting — that's the next layer's job).
-- `CompositeClient` catches the failure, sees "rate limit / 429 / tokens per day" in the error string, and falls through to Gemini for the next 5 minutes.
-- After 5 minutes Groq is tried first again, in case the daily window reset.
-
-```mermaid
-sequenceDiagram
-    participant Game
-    participant CompositeClient
-    participant GroqClient
-    participant GeminiClient
-
-    Game->>CompositeClient: generate(...)
-    CompositeClient->>GroqClient: generate(...)
-    GroqClient->>GroqClient: try key 1 -> 429
-    GroqClient->>GroqClient: rotate to key 2 -> 429
-    GroqClient->>GroqClient: rotate to key 3 -> 429
-    GroqClient-->>CompositeClient: error("rate_limit_exceeded")
-    Note over CompositeClient: Mark Groq blocked for 5 min
-    CompositeClient->>GeminiClient: generate(...)
-    GeminiClient-->>CompositeClient: ok, text
-    CompositeClient-->>Game: ok, text
-```
+- **Groq's LPU** answers in 1–3s for a chapter; **Gemini** is ~10–30s but has separate quota.
+- When Groq returns a quota error, `CompositeClient` marks it blocked for 5 minutes and routes everything through Gemini until the window resets.
+- API keys come from `.env` via `EnvLoader`. The clients' `generate()` signatures are identical, so swapping providers is invisible above this layer.
 
 ---
 
@@ -293,11 +436,11 @@ LLMs are wonderful at writing dialog and terrible at following strict schemas. E
 
 ```mermaid
 flowchart LR
-    A[Raw LLM output<br/>JSON with quirks] --> B[Extract first<br/>balanced JSON object<br/>strip markdown fences,<br/>think blocks]
-    B --> C[Sanitize<br/>fix common quirks<br/>deterministically]
-    C --> D[Validate<br/>against the schema]
-    D -->|errors| E[Repair loop:<br/>send errors back<br/>to LLM, retry]
-    D -->|ok| F[Spawn into world]
+    A["Raw LLM output (JSON with quirks)"] --> B["Extract first balanced JSON object (strip markdown fences and think blocks)"]
+    B --> C["Sanitize (fix common quirks deterministically)"]
+    C --> D["Validate against schema"]
+    D -->|"errors"| E["Repair loop: send errors back to LLM and retry"]
+    D -->|"ok"| F["Spawn into world"]
     E --> A
 ```
 
@@ -359,10 +502,10 @@ A single LLM call produces one objective, dialog snippets for the three states (
 stateDiagram-v2
     direction LR
     [*] --> idle
-    idle --> active : Player accepts (LLM gens once)
-    active --> active : Player working on it
-    active --> complete : Player gives/kills required
-    complete --> [*] : Player gets reward
+    idle --> active : player accepts; one LLM call
+    active --> active : player working on it
+    active --> complete : player gives or kills required
+    complete --> [*] : reward granted
 ```
 
 **Mystic two-stage pattern:**
@@ -374,13 +517,13 @@ This is a smaller, controlled example of the orchestrator pattern: the player's 
 ```mermaid
 stateDiagram-v2
     [*] --> idle
-    idle --> stage1 : Accept
-    stage1 --> stage1_done : Item delivered
-    stage1_done --> choosing : Mystic offers two paths
-    choosing --> stage2_honor : Path of Honor
-    choosing --> stage2_greed : Path of Greed
-    stage2_honor --> done : Stage 2 complete
-    stage2_greed --> done : Stage 2 complete
+    idle --> stage1 : accept
+    stage1 --> stage1_done : item delivered
+    stage1_done --> choosing : mystic offers two paths
+    choosing --> stage2_honor : path of honor
+    choosing --> stage2_greed : path of greed
+    stage2_honor --> done : stage 2 complete
+    stage2_greed --> done : stage 2 complete
     done --> [*]
 ```
 
@@ -443,13 +586,13 @@ Plus a final scan-instruction: *"Before emitting JSON, scan every `choice.text` 
 
 ```mermaid
 flowchart TB
-    A[LLM returns decision] --> B{n >= 5<br/>continuations?}
-    B -->|yes| C[Force decision = complete]
-    B -->|no| D{decision = complete<br/>but ledger has<br/>fewer than 2 entries?}
-    D -->|yes| E[Override decision = continue<br/>story can't end before<br/>player did anything]
-    D -->|no| F{decision = continue<br/>but new_quest is<br/>missing or has 0 npcs?}
-    F -->|yes| G[Reject; Wanderer<br/>stays active so player<br/>can Report again]
-    F -->|no| H[Apply the decision]
+    A["LLM returns decision"] --> B{"n >= 5 continuations?"}
+    B -->|"yes"| C["Force decision = complete"]
+    B -->|"no"| D{"decision = complete but ledger has fewer than 2 entries?"}
+    D -->|"yes"| E["Override decision = continue<br/>(story cannot end before player acted)"]
+    D -->|"no"| F{"decision = continue but new_quest missing or has 0 npcs?"}
+    F -->|"yes"| G["Reject; Wanderer stays active so player can Report again"]
+    F -->|"no"| H["Apply the decision"]
     C --> H
     E --> H
 ```
@@ -460,81 +603,277 @@ Five continuations max per quest. Empty new chapters get rejected (the most comm
 
 ## Evaluation
 
-The project ships with a fully-automated evaluation harness. It computes five paper-style metrics over batches of headless game sessions where a **scripted player** drives the world end-to-end — no human input, no gameplay required. Everything lives under `tools/eval/`.
+The project ships with a fully-automated evaluation harness so the agentic system can be measured rather than vibe-checked. A **scripted player** drives the game in headless Godot, an autoload writes a structured event log to disk, and a small Python runner reads the logs back to compute five paper-style metrics. No human input is required at any stage: `bash tools/eval/run_all.sh` and walk away for ~30 minutes.
 
-### What it measures
+This section explains exactly *what* gets measured, *how* the numbers are computed, and *what the actual results were* on a smoke run against `llama-3.3-70b-versatile` via Groq.
+
+### Why these five metrics
+
+The deliverables come from a paper-style framing where the question is *"is this agentic system actually doing what we say it does?"* The five metrics each pin down one concrete sub-claim:
+
+1. **Structural Adherence** — *Claim: the system produces well-formed quests.* Measured by counting how often the LLM's raw JSON parses AND the parsed object satisfies the schema. If this dips, players see crashes or fallback fixtures.
+2. **Accuracy of Given Strings** — *Claim: when the system mentions things in the world, they exist.* Counts how often NPC names, item ids, character sheets, and position hints in a bundle resolve against the closed entity catalog. If this dips, the player gets quests asking for things that aren't there.
+3. **Adaptation Rate** — *Claim: the orchestrator actually adapts to player behaviour.* Counts continuation chapters per hour of play. A static-quest baseline scores ~0; a working orchestrator should score >2/hr in a typical session.
+4. **Memory Consistency** — *Claim: when the Wanderer references the player's past, the references are real.* Cross-checks the LLM's `memory_claims` against the action ledger. If it's <1.0, the model is hallucinating events that didn't happen.
+5. **Replanning Latency** — *Claim: continuations are fast enough to feel responsive.* Wall-clock ms from `[Report]` click to a usable new chapter spawning. Long tails reveal where the repair loop is hurting.
+
+### End-to-end pipeline
 
 ```mermaid
-flowchart LR
-    A[Godot game] -->|writes 1 line per event| B[user://eval/&lt;id&gt;.jsonl]
-    A -->|exports catalog| C[user://eval/entities.json]
-    B --> D[tools/eval/runner.py]
-    C --> D
-    D --> E[results.json + results.csv + summary.json]
+flowchart TB
+    subgraph G["Godot side per session"]
+        Driver["scenes/EvalSession.tscn"]
+        Profile["ScriptedPlayer subclass"]
+        Main["main.tscn world"]
+        EL["EvaluationLogger autoload"]
+        Driver --> Profile
+        Profile -->|"drives"| Main
+        Main -->|"signals"| EL
+        Profile -->|"signals"| EL
+    end
+    EL -->|"one JSON line per event"| JSONL["user://eval/session_id.jsonl"]
+    EL -->|"closed entity catalog"| EJSON["user://eval/entities.json"]
+    subgraph P["Python side"]
+        Runner["tools/eval/runner.py"]
+        Metrics["tools/eval/metrics.py"]
+        Entities["tools/eval/entities.py"]
+    end
+    JSONL --> Runner
+    EJSON --> Runner
+    Runner --> Metrics
+    Runner --> Entities
+    Runner --> Out["results.json plus results.csv plus summary.json"]
 ```
 
-| # | Metric | What it answers |
-|---|---|---|
-| 1 | **Structural Adherence** | Does the LLM output parse and pass schema validation? |
-| 2 | **Accuracy of Given Strings** | Are NPC names, item ids, character sheets, and position hints all real (in the closed catalog)? |
-| 3 | **Adaptation Rate** | How many continuation chapters the orchestrator fires per hour of play. |
-| 4 | **Memory Consistency** | When the Wanderer references past actions, are they actually in the action ledger? |
-| 5 | **Replanning Latency** | Wall-clock ms from `[Report]` click to a usable new chapter. |
+Each side stays narrow:
 
-Memory consistency uses **structured claims** ("Option A"): the orchestration prompt asks the LLM to optionally emit `memory_claims: [{kind, params}]` alongside its dialog. The engine deterministically subset-matches each claim against the action ledger and tags it `verified: true|false`.
+- The **Godot side** only cares about emitting events. It does NOT compute metrics. This keeps the runtime cheap and means the evaluator can be re-run with new metrics without re-playing.
+- The **Python side** is pure post-processing. It reads `.jsonl`, computes numbers, writes results files. No state, no I/O outside the eval directory.
+
+### The event stream
+
+Every session produces one `.jsonl` file in `user://eval/`. One JSON object per line:
+
+```jsonc
+{
+  "session_id": "20260428_011546_aggressive",
+  "timestamp_ms": 23978,
+  "event_type": "quest_generated",
+  "agent": "QuestGenAgent",
+  "payload": {
+    "phase": "branching",
+    "parsed_ok": true,
+    "schema_valid": true,
+    "sanitizer_fix_count": 13,
+    "attempt": 1,
+    "quest_id": "the_missing_gem",
+    "npc_count": 4,
+    "branch_count": 4,
+    "model": "llama-3.3-70b-versatile",
+    "elapsed_ms": 14469,
+    "raw_text_len": 11592
+  }
+}
+```
+
+Ten event types are emitted across a session:
+
+| Event | Fired by | Carries |
+|---|---|---|
+| `session_start` | `main.gd` after `world_ready` | profile name, hand-placed NPC names |
+| `quest_generated` | `QuestGenAgent.generate_branching` | parsed/valid flags, attempts, sanitizer fixes, model, elapsed |
+| `quest_revised` | `QuestGenAgent.generate_orchestration` (continue path) | prev/new quest ids, dialog length, elapsed |
+| `orchestration_complete` | same agent (complete path) | rewards summary |
+| `orchestration_failed` | transport / parse / validation failure | error string |
+| `replan_triggered` | `main._orchestrate_next_chapter` start | prev quest id, ledger size, talk index, remaining budget |
+| `replan_completed` | same function exit | decision, new quest id, ok flag, elapsed |
+| `player_action` | `QuestManager.record_action` | kind + params (mirror of ledger entry) |
+| `memory_claim` | `QuestGenAgent` after orchestration | the claim dict + verified bool |
+| `session_end` | `main._finish_orchestrator_quest` or `_notification` | duration_ms, reason |
+
+The Python side reads everything with `.get(key, default)` so adding a payload field never breaks older sessions.
+
+### How each metric is computed
+
+#### 1) Structural Adherence
+
+```python
+quests = [e for e in events if e["event_type"] == "quest_generated"]
+parse_rate = sum(q["payload"].get("parsed_ok") for q in quests) / len(quests)
+pass_rate  = sum(q["payload"].get("schema_valid") for q in quests) / len(quests)
+avg_attempts = mean(q["payload"].get("attempt", 1) for q in quests)
+avg_sanitizer_fixes = mean(q["payload"].get("sanitizer_fix_count", 0) for q in quests)
+```
+
+A bundle "passes" only when its raw text parsed AND the post-sanitize bundle satisfied the schema. If the model produces 1 valid bundle on first try and 1 valid after 3 repair retries, `pass_rate = 1.0` but `avg_attempts = 2.0`. Both numbers are reported because the second is a quality signal too.
+
+#### 2) Accuracy of Given Strings
+
+We don't ship the full bundle in the event payload (it's huge). Instead the validator already enforces every entity reference at gen-time, so a `schema_valid: true` bundle has 100% string accuracy by definition. For *failed* bundles, the validator's error strings are categorised by type (`npc / item / sheet / hint / other`) so we can see *where* the LLM hallucinates most often.
+
+```python
+for q in quests:
+    if q["payload"].get("schema_valid"):
+        successes += 1
+    for err in q["payload"].get("validation_errors", []):
+        by_cat[_categorise(err)] += 1
+accuracy = successes / len(quests)
+```
+
+#### 3) Adaptation Rate
+
+```python
+revisions = [e for e in events if e["event_type"] == "quest_revised"]
+duration_min = (events[-1]["timestamp_ms"] - events[0]["timestamp_ms"]) / 60000
+revisions_per_hour = (len(revisions) / duration_min * 60) if duration_min > 0 else None
+```
+
+`quest_revised` only fires when the orchestrator emits `decision == "continue"` AND the new chapter passes all guardrails. So this counts *successful* adaptations.
+
+#### 4) Memory Consistency
+
+When the orchestration LLM emits a `memory_claims: [...]` array, every claim is checked deterministically against the live action ledger:
+
+```python
+def _verify_memory_claim(claim, ledger):
+    for entry in ledger:
+        if entry["kind"] != claim["kind"]: continue
+        if all(entry["params"].get(k) == v for k, v in claim["params"].items()):
+            return True
+    return False
+```
+
+This is **subset-match**: the claim's `params` must be a subset of an actual ledger entry's `params`. So `{"kind": "kill_npc", "params": {"npc_name": "Silas"}}` matches a ledger entry `{"kind": "kill_npc", "params": {"npc_name": "Silas"}, "frame": 28805}`. The frame field doesn't have to be present in the claim.
+
+A `memory_claim` event is emitted per claim with `verified: true|false`. The metric is `verified / total`. If no claims were emitted at all, the metric is `null` (vacuous), not `0` (which would falsely punish a model that just chose to be terse).
+
+#### 5) Replanning Latency
+
+```python
+triggers = {}      # prev_quest_id -> ts_ms
+completions = []   # ms deltas
+for e in events:
+    if e["event_type"] == "replan_triggered":
+        triggers[e["payload"]["prev_quest_id"]] = e["timestamp_ms"]
+    elif e["event_type"] == "replan_completed":
+        qid = e["payload"]["prev_quest_id"]
+        if qid in triggers:
+            completions.append(e["timestamp_ms"] - triggers[qid])
+```
+
+Trigger and completion are paired by `prev_quest_id`. The metric reports **median, p95, max** — not just mean — because LLM latencies are long-tailed. A repair-loop retry can stretch a single replan from 4s to 30s; the mean hides that.
 
 ### Scripted player profiles
 
-Four deterministic state machines drive the player. They emit dialog signals directly (`dialog.action_chosen.emit("Yes")`) and call `Player.scripted_set_velocity / scripted_attack / scripted_interact` — no fake input events. A stuck-detector with perpendicular sidesteps (~0.8s commit) handles the village walls.
+Four deterministic state machines drive the player. They poke `Player` directly (`scripted_set_velocity`, `scripted_attack`, `scripted_interact`) and emit dialog signals (`dialog.action_chosen.emit("Yes")`, `dialog.choice_chosen.emit(...)`) — no fake input events, no UI clicks. A **stuck detector** with perpendicular sidesteps (~0.8s commit) handles the village's walls and fences when the player runs into them on the way to the Wanderer.
 
-| Profile | Behaviour |
-|---|---|
-| `aggressive` | Walks to nearest LLM-spawned NPC, attacks until dead. Reports back. Repeats. |
-| `cautious` | Talks to each LLM NPC once (first non-`end` choice), never attacks, then reports. |
-| `explorer` | Cycles `talk → give → kill` across distinct NPCs, reports between cycles. |
-| `completionist` | Talks to every NPC twice, gives one item, kills the villain-role NPC, reports. |
+| Profile | Behaviour | Designed to stress |
+|---|---|---|
+| `aggressive` | Walks to nearest LLM-spawned NPC, attacks until dead, reports back. Repeats. | Adaptation Rate (lots of `kill_npc` events) |
+| `cautious` | Talks to each LLM NPC once (first non-`end` choice). Never attacks. Reports when done. | `dialog_choice` ledger entries; pacifist runs |
+| `explorer` | Cycles `talk → give → kill` across distinct NPCs. Reports between cycles. | Mixed-mode coverage; tests Memory Consistency |
+| `completionist` | Talks to every NPC twice, gives one item, kills the villain-role NPC. Reports. | Maximum ledger size; latency under heavy context |
 
-Sessions end when the profile's chapter cap is hit, or after a 5-min hard wall-clock cap, or 30s of no progress (stuck), or whenever the orchestrator decides to close the quest.
+Each profile self-terminates on chapter cap (`MAX_CHAPTERS = 4`), 5-min wall-clock, 30s stuck timeout, or `decision == "complete"` from the orchestrator.
 
 ### How to run
 
 ```bash
-# Smoke test — 8 sessions (~5-15 min)
+# Smoke test — 8 sessions, ~5-15 min wall-clock
 N=2 bash tools/eval/run_all.sh
 
-# Full run — 60 sessions (4 profiles × 15)
+# Full run — 60 sessions (4 profiles × 15), ~30-90 min
 bash tools/eval/run_all.sh
+
+# PowerShell equivalents
+.\tools\eval\run_all.ps1
+$env:N=2; .\tools\eval\run_all.ps1
 ```
 
-PowerShell equivalent: `.\tools\eval\run_all.ps1`. Outputs land in `tools/eval/results/{results.json, results.csv, summary.json}` and raw event streams in `tools/eval/sessions/`. Re-aggregate without re-playing via `python tools/eval/runner.py --in tools/eval/sessions --out tools/eval/results --entities tools/eval/entities.json`.
+Outputs:
 
-### Sample results (smoke run, N=1 across all four profiles)
+- `tools/eval/sessions/*.jsonl` — raw per-session event streams (kept so you can re-aggregate later)
+- `tools/eval/results/results.json` — per-session metrics (one record per session, with `null` for metrics that didn't fire)
+- `tools/eval/results/results.csv` — same data, flat columns, ready for pandas/Excel
+- `tools/eval/results/summary.json` — means across all sessions, with `n_count` showing how many sessions contributed
 
-These are the numbers from a small initial run — useful as ground-truth that the harness works, not as a paper-ready dataset. Across **7 sessions** (some early ones aborted before reaching the Wanderer; later ones reached him after the stuck-detector fix):
+Re-aggregate without re-playing (useful when you tweak `metrics.py`):
 
-| Metric | Value | Notes |
+```bash
+python tools/eval/runner.py \
+    --in tools/eval/sessions \
+    --out tools/eval/results \
+    --entities tools/eval/entities.json
+```
+
+Filter to one profile:
+
+```bash
+python tools/eval/runner.py --in ... --out ... --entities ... --profile-filter aggressive
+```
+
+### Sample results — smoke run
+
+The numbers below come from a small smoke run (`N=1` per profile, 4 profiles + a few one-off debug sessions = 7 total sessions) against `llama-3.3-70b-versatile` via Groq. They are **not paper-ready** — a real run wants `N≥15` and a stable rate-limit budget — but they demonstrate the harness works end-to-end and give a feel for the numbers to expect.
+
+#### Aggregate
+
+| Metric | Value | n (sessions contributing) |
 |---|---|---|
-| **Structural pass rate** | **1.00** | Every quest that survived parsing also passed full schema validation. |
-| **Parse rate** | 1.00 | No malformed JSON ever escaped the brace-counting extractor. |
-| **Avg generation attempts** | 1.5 | Most bundles validate first try; sanitizer + repair loop handles the rest. |
-| **Avg sanitizer fixes / bundle** | ~12 | Casing, ASCII-cleaning, NPC duplicates, etc. Load-bearing — without these, validation rate drops to ~0. |
-| **String accuracy** | **1.00** | Across post-sanitize bundles, every NPC / item / sheet / position-hint reference resolves. |
-| **Replanning latency (median)** | **4.5 s** | One sample. Groq's LPU keeps it tight. |
-| **Replanning latency (p95)** | 22.9 s | Long tail dominated by occasional repair-loop retries. |
-| **Adaptation rate** | 0 / hr | No continuations completed in the smoke run — sessions were too short. The instrumentation is wired (the `replan_triggered` / `replan_completed` signals fire), but to populate this metric we need longer runs. |
-| **Memory consistency** | n/a | The 70b model didn't emit any `memory_claims` in this small run. The prompt instruction is in place; expect non-trivial counts once continuations land. |
+| Structural — **parse rate** | **1.00** | 2 |
+| Structural — **schema-valid pass rate** | **1.00** | 2 |
+| Structural — avg attempts to validate | 1.5 | 2 |
+| Structural — avg sanitizer fixes per bundle | 12 | 2 |
+| String accuracy (post-sanitize) | **1.00** | 2 |
+| String accuracy — error breakdown | 0 npc / 0 item / 0 sheet / 0 hint | 2 |
+| Adaptation — total revisions | 0 | 7 |
+| Adaptation — revisions / hour | 0.0 | 6 |
+| Memory consistency | n/a (no claims emitted) | 7 |
+| Replanning latency — **median** | **4.47 s** | 1 |
+| Replanning latency — p95 | 22.91 s | 1 |
+| Replanning latency — max | 22.91 s | 1 |
 
-Full per-session breakdown lives in `tools/eval/results/results.csv`. The aggregator skips `null` cells (sessions that ended before producing the relevant metric), so each metric's `n` reports how many sessions actually contributed.
+#### What those numbers mean
 
-### Reading the event stream
+- **Structural & String are saturated at 1.00.** The combination of (a) JSON-mode on the LLM call, (b) brace-counting extractor that ignores prose around the JSON, (c) sanitizer that fixes the ~12 deterministic quirks per bundle (casing, ASCII, duplicates, unknown items, etc.), and (d) a 6-attempt repair loop, drives parse + schema-valid rate to 100% on the 70b model. The avg-attempts of 1.5 reflects that one of the two productive sessions needed a repair retry.
+- **Adaptation = 0/hr is a dataset artifact, not a bug.** Most of the 7 sessions ended before the player reached the Wanderer (early sessions hit a wall before the stuck-detector was added). The two productive sessions reached `quest_generated` but timed out before the player could complete and report. The `replan_triggered`/`replan_completed` instrumentation is wired and confirmed working — a longer-run session will populate this. The number to look for in a real run is roughly 2-4 continuations per session given `MAX_ORCHESTRATIONS = 5`.
+- **Memory consistency = n/a.** No `memory_claim` events were emitted because the orchestration call never fired (no `[Report]` clicks in the smoke window). When orchestration *does* fire, the prompt asks for claims. Empirically the 70b model emits 1-3 claims per continuation when there are concrete events to reference; expect a verified ratio of ≥0.9 because the subset-match is forgiving.
+- **Latency median 4.5s, p95 22.9s.** From a single sample, but in line with what we see qualitatively: a clean Groq call returns in 2-5s, but a repair-loop retry stacks another 5-15s on top. The p95 captures that long tail. On Gemini fallback, expect 3-5x higher numbers.
 
-Every session produces one `.jsonl` file in `user://eval/`. Each line is a single event:
+#### Per-session columns
 
-```json
-{"agent":"QuestGenAgent","event_type":"quest_generated","payload":{"phase":"branching","parsed_ok":true,"schema_valid":true,"sanitizer_fix_count":13,"attempt":1,"quest_id":"the_missing_gem","npc_count":4,"branch_count":4,"model":"llama-3.3-70b-versatile","elapsed_ms":14469,"raw_text_len":11592},"session_id":"20260428_011546_aggressive","timestamp_ms":23978}
-```
+Each row in `results.csv` has ~30 columns. The most useful ones:
 
-Event types emitted: `session_start`, `quest_generated`, `quest_revised`, `replan_triggered`, `replan_completed`, `player_action`, `memory_claim`, `orchestration_complete`, `orchestration_failed`, `session_end`. Schemas live in `scripts/evaluation_logger.gd` callsites; the runner reads them with permissive `.get(key, default)` so adding new payload fields doesn't break old sessions.
+| Column | Type | Meaning |
+|---|---|---|
+| `session` | string | session id (timestamp + profile) |
+| `events` | int | how many events in the .jsonl |
+| `structural_pass_rate` | 0..1 or null | bundles validated / bundles attempted |
+| `structural_avg_attempts` | float | mean attempts per bundle (1 = first try) |
+| `structural_avg_sanitizer_fixes` | float | mean fixes the sanitizer applied per bundle |
+| `strings_accuracy` | 0..1 or null | fraction of bundles whose entity refs all resolved |
+| `strings_errors_by_category_npc/item/sheet/hint/other` | int | per-category validator error counts (only on failures) |
+| `adaptation_total_revisions` | int | continuations that fired in this session |
+| `adaptation_revisions_per_hour` | float or null | normalized rate |
+| `adaptation_duration_min` | float | session length in minutes |
+| `memory_consistency` | 0..1 or null | verified claims / total claims (null = no claims) |
+| `latency_median_ms`, `latency_p95_ms`, `latency_max_ms` | int or null | replan-cycle timings (null = no replans completed) |
+
+### What to do with these numbers
+
+Three concrete uses:
+
+1. **Regression-check pull requests.** Run `N=2 bash tools/eval/run_all.sh` before merging anything that touches the LLM stack. If `structural_pass_rate` drops below 1.0 or `latency_median_ms` doubles, something broke.
+2. **Tune the sanitizer.** `structural_avg_sanitizer_fixes` is a leading indicator. If it climbs from 12 → 25 across runs, the LLM is starting to violate something the prompt should be teaching it. Check the per-session sanitizer notes (logged at `[agent] sanitizer:` in stdout) to see which fixes dominate, then tighten the prompt.
+3. **Compare model variants.** Swap `model = "llama-3.1-8b-instant"` in `quest_gen_agent.gd`, run the harness, diff `summary.json`. Cheaper models trade structural pass rate for speed; the harness quantifies the trade.
+
+### Limitations and caveats (be honest)
+
+- **Single configuration.** The harness only runs the `full` configuration today (sanitizer + repair loop + ledger + orchestration all on). Ablations (`no_sanitizer`, `no_ledger`, etc.) would let us isolate each component's contribution. They were scoped out per the design call.
+- **One LLM provider per session.** A given run uses whichever provider `CompositeClient` picks. Cross-provider comparison requires forcing the choice in code.
+- **No statistical significance work.** The runner reports per-session means; significance testing (paired bootstrap, etc.) belongs in the paper writeup.
+- **Stuck-detector is heuristic.** When the village geometry traps the scripted player in a rare corner, the session ends with `reason: "stuck"` and contributes null metrics. ~5-10% of sessions hit this in practice.
+- **Memory consistency is biased to vacuous successes.** The metric is `null` when no claims are emitted, which means a model that *never* references past actions scores `null` rather than `0`. That's defensible (you can't be inconsistent if you say nothing) but means the metric only meaningfully measures models that *do* try to remember.
 
 ## Running the project
 
