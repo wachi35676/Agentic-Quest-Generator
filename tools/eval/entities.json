@@ -1,0 +1,76 @@
+{
+  "action_bare": [
+    "drop_inventory",
+    "die"
+  ],
+  "action_prefixes": [
+    "give_player",
+    "take_player",
+    "set_flag",
+    "remember"
+  ],
+  "character_sheets": [
+    "Hunter",
+    "Knight",
+    "Monk",
+    "OldMan",
+    "Princess",
+    "Villager"
+  ],
+  "hand_placed_npcs": [
+    "Farmer",
+    "Hunter",
+    "Old Sage",
+    "Mystic",
+    "Wanderer"
+  ],
+  "item_ids": [
+    "stone",
+    "branch",
+    "feather",
+    "grass",
+    "gem_red",
+    "gem_green",
+    "key_gold",
+    "key_silver",
+    "coin_gold",
+    "coin_silver",
+    "apple",
+    "meat",
+    "honey",
+    "fish",
+    "potion_red",
+    "potion_blue",
+    "potion_white",
+    "medipack",
+    "heart",
+    "book",
+    "letter",
+    "pickaxe",
+    "axe",
+    "sword"
+  ],
+  "objective_types": [
+    "collect",
+    "drop",
+    "give",
+    "take",
+    "talk",
+    "kill_enemy",
+    "kill_npc",
+    "dialog_choice",
+    "reach"
+  ],
+  "position_hints": [
+    "ne",
+    "nw",
+    "se",
+    "sw",
+    "n",
+    "s",
+    "e",
+    "w",
+    "center",
+    "near_player"
+  ]
+}

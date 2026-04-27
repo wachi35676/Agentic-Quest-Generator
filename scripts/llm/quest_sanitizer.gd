@@ -192,7 +192,8 @@ static func _drop_objectives_with_unknown_npcs(bundle: Dictionary,
 		extra_known_npcs: Array, notes: Array) -> void:
 	# Build the canonical set of "real" NPCs: extra_known (the hand-placed
 	# quest-giver) + the bundle's spawned npcs[]. Any objective whose
-	# npc_name doesn't resolve to one of those gets dropped.
+	# npc_name doesn't resolve to one of those gets dropped. Same for
+	# objectives with item_id outside the catalog (e.g. invented "clue").
 	var known: Dictionary = {}
 	for nm in extra_known_npcs:
 		known[String(nm)] = true
@@ -200,33 +201,38 @@ static func _drop_objectives_with_unknown_npcs(bundle: Dictionary,
 		var s: String = String((n as Dictionary).get("npc_name",""))
 		if s != "": known[s] = true
 	var quest: Dictionary = bundle.get("quest", {})
-	# Walk every objective container and filter.
 	var filter_lists: Array = ["objectives", "fail_conditions"]
 	for k in filter_lists:
 		var arr: Array = quest.get(k, [])
 		var kept: Array = []
 		for o in arr:
-			if not (o is Dictionary): continue
-			var nm: String = String((o as Dictionary).get("params", {}).get("npc_name",""))
-			if nm == "" or known.has(nm):
+			if _objective_ok(o, known, notes, "quest.%s" % k):
 				kept.append(o)
-			else:
-				notes.append("drop %s objective: unknown npc '%s'" % [k, nm])
 		quest[k] = kept
-	# Branch objectives.
 	for b in quest.get("branches", []):
 		if not (b is Dictionary): continue
 		var bobjs: Array = (b as Dictionary).get("objectives", [])
 		var bkept: Array = []
 		for o in bobjs:
-			if not (o is Dictionary): continue
-			var nm2: String = String((o as Dictionary).get("params", {}).get("npc_name",""))
-			if nm2 == "" or known.has(nm2):
+			if _objective_ok(o, known, notes, "branch '%s'" % String((b as Dictionary).get("id","?"))):
 				bkept.append(o)
-			else:
-				notes.append("drop branch '%s' objective: unknown npc '%s'" % [
-						String((b as Dictionary).get("id","?")), nm2])
 		(b as Dictionary)["objectives"] = bkept
+
+# Returns true if the objective references real NPCs and items only.
+# Logs a drop note otherwise.
+static func _objective_ok(o: Variant, known_npcs: Dictionary, notes: Array, where: String) -> bool:
+	if not (o is Dictionary):
+		return false
+	var p: Dictionary = (o as Dictionary).get("params", {})
+	var nm: String = String(p.get("npc_name",""))
+	if nm != "" and not known_npcs.has(nm):
+		notes.append("%s: drop objective with unknown npc '%s'" % [where, nm])
+		return false
+	var iid: String = String(p.get("item_id",""))
+	if iid != "" and not ItemDB.has(iid):
+		notes.append("%s: drop objective with unknown item '%s'" % [where, iid])
+		return false
+	return true
 
 static func _ensure_branch_report_back(bundle: Dictionary,
 		extra_known_npcs: Array, notes: Array) -> void:

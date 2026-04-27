@@ -95,6 +95,8 @@ func record_action(kind: String, params: Dictionary) -> void:
 	})
 	if action_ledger.size() > _LEDGER_CAP:
 		action_ledger = action_ledger.slice(action_ledger.size() - _LEDGER_CAP)
+	EvaluationLogger.log("player_action", "QuestManager",
+			{"kind": kind, "params": params})
 
 func clear_ledger() -> void:
 	action_ledger.clear()

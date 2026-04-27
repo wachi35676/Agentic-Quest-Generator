@@ -1,0 +1,12 @@
+{"agent":"main","event_type":"session_start","payload":{"profile":"aggressive","world_npcs":["Farmer","Hunter","Old Sage","Mystic","Wanderer"]},"session_id":"20260428_011546_aggressive","timestamp_ms":352}
+{"agent":"QuestGenAgent","event_type":"quest_generated","payload":{"attempt":1,"branch_count":5,"elapsed_ms":5267,"model":"llama-3.3-70b-versatile","npc_count":3,"parsed_ok":true,"phase":"branching","quest_id":"redemption","raw_text_len":8408,"sanitizer_fix_count":13,"schema_valid":true},"session_id":"20260428_011546_aggressive","timestamp_ms":14771}
+{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"victim"}},"session_id":"20260428_011546_aggressive","timestamp_ms":15586}
+{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"betrayer"}},"session_id":"20260428_011546_aggressive","timestamp_ms":18084}
+{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"witness"}},"session_id":"20260428_011546_aggressive","timestamp_ms":21837}
+{"agent":"main","event_type":"replan_triggered","payload":{"ledger_size":3,"prev_quest_id":"","remaining":5,"talk_index":1},"session_id":"20260428_011546_aggressive","timestamp_ms":24004}
+{"agent":"main","event_type":"replan_completed","payload":{"decision":"","elapsed_ms":4098,"new_quest_id":"","ok":false,"prev_quest_id":""},"session_id":"20260428_011546_aggressive","timestamp_ms":28102}
+{"agent":"main","event_type":"replan_triggered","payload":{"ledger_size":3,"prev_quest_id":"","remaining":5,"talk_index":1},"session_id":"20260428_011546_aggressive","timestamp_ms":28382}
+{"agent":"main","event_type":"replan_completed","payload":{"decision":"","elapsed_ms":4471,"new_quest_id":"","ok":false,"prev_quest_id":""},"session_id":"20260428_011546_aggressive","timestamp_ms":32853}
+{"agent":"main","event_type":"replan_triggered","payload":{"ledger_size":3,"prev_quest_id":"","remaining":5,"talk_index":1},"session_id":"20260428_011546_aggressive","timestamp_ms":33185}
+{"agent":"main","event_type":"replan_completed","payload":{"decision":"","elapsed_ms":22913,"new_quest_id":"","ok":false,"prev_quest_id":""},"session_id":"20260428_011546_aggressive","timestamp_ms":56098}
+{"agent":"main","event_type":"replan_triggered","payload":{"ledger_size":3,"prev_quest_id":"","remaining":5,"talk_index":1},"session_id":"20260428_011546_aggressive","timestamp_ms":56613}

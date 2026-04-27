@@ -289,8 +289,13 @@ func generate_branching(quest_giver_name: String, quest_giver_role: String) -> D
 			quest_giver_name, quest_giver_role]
 	print("[agent] starting branching generation for ", quest_giver_name)
 	progress.emit("calling", model)
+	var t0 := Time.get_ticks_msec()
 	var resp := await _client.generate(model, system, user, {"num_predict": 4096})
 	if not resp.ok:
+		EvaluationLogger.log("quest_generated", "QuestGenAgent", {
+			"phase": "branching", "parsed_ok": false, "transport_failed": true,
+			"error": resp.error, "model": model, "elapsed_ms": Time.get_ticks_msec() - t0,
+		})
 		return {"ok": false, "error": resp.error}
 	var attempt := 0
 	var last_text: String = resp.text
@@ -299,6 +304,11 @@ func generate_branching(quest_giver_name: String, quest_giver_role: String) -> D
 		var parse := _parse_bundle(last_text)
 		if not parse.ok:
 			if attempt >= MAX_REPAIRS:
+				EvaluationLogger.log("quest_generated", "QuestGenAgent", {
+					"phase": "branching", "parsed_ok": false, "attempt": attempt + 1,
+					"error": parse.error, "model": model,
+					"elapsed_ms": Time.get_ticks_msec() - t0,
+				})
 				return {"ok": false, "error": parse.error}
 			attempt += 1
 			progress.emit("repairing", "%d/%d" % [attempt, MAX_REPAIRS])
@@ -318,10 +328,27 @@ func generate_branching(quest_giver_name: String, quest_giver_role: String) -> D
 		if errs.is_empty():
 			print("[agent] branching VALID on attempt %d" % (attempt + 1))
 			progress.emit("ready", "")
+			EvaluationLogger.log("quest_generated", "QuestGenAgent", {
+				"phase": "branching", "parsed_ok": true, "schema_valid": true,
+				"sanitizer_fix_count": san.notes.size(),
+				"attempt": attempt + 1,
+				"quest_id": String(bundle.get("quest", {}).get("id","")),
+				"npc_count": (bundle.get("npcs", []) as Array).size(),
+				"branch_count": (bundle.get("quest", {}).get("branches", []) as Array).size(),
+				"model": model, "elapsed_ms": Time.get_ticks_msec() - t0,
+				"raw_text_len": last_text.length(),
+			})
 			return {"ok": true, "bundle": bundle}
 		print("[agent] branching validate failed (%d errors)" % errs.size())
 		for i in range(min(errs.size(), 6)): print("  - ", errs[i])
 		if attempt >= MAX_REPAIRS:
+			EvaluationLogger.log("quest_generated", "QuestGenAgent", {
+				"phase": "branching", "parsed_ok": true, "schema_valid": false,
+				"sanitizer_fix_count": san.notes.size(),
+				"attempt": attempt + 1,
+				"validation_errors": errs,
+				"model": model, "elapsed_ms": Time.get_ticks_msec() - t0,
+			})
 			return {"ok": false, "error": "validation failed: %s" % errs[0]}
 		attempt += 1
 		progress.emit("repairing", "%d/%d" % [attempt, MAX_REPAIRS])
@@ -346,8 +373,14 @@ func generate_orchestration(prev_quest_summary: Dictionary, ledger: Array,
 			quest_giver_name, current_npc_names, max_remaining)
 	var user := LlmPrompts.build_orchestration_user_prompt(prev_quest_summary, ledger)
 	progress.emit("orchestrating", quest_giver_name)
+	var t0 := Time.get_ticks_msec()
 	var resp := await _client.generate(model, system, user, {"num_predict": 4096}, "json")
 	if not resp.ok:
+		EvaluationLogger.log("orchestration_failed", "QuestGenAgent", {
+			"phase": "orchestration", "transport_failed": true,
+			"error": resp.error, "model": model,
+			"elapsed_ms": Time.get_ticks_msec() - t0,
+		})
 		return {"ok": false, "error": resp.error}
 	_dump_raw(resp.text, "orchestration")
 	var p: Variant = _extract_first_json(resp.text)
@@ -392,7 +425,47 @@ func generate_orchestration(prev_quest_summary: Dictionary, ledger: Array,
 			rewards = []
 		out["rewards"] = rewards
 	print("[agent] orchestration VALID (decision=%s)" % decision)
+	# Verify memory claims (Option A): each claim must subset-match a
+	# ledger entry of the same kind. Emit one event per claim so the
+	# Python evaluator can compute Memory Consistency.
+	var claims: Array = []
+	if d.has("memory_claims") and (d.memory_claims is Array):
+		claims = d.memory_claims
+	for c in claims:
+		if not (c is Dictionary): continue
+		var ok_claim := _verify_memory_claim(c, ledger)
+		EvaluationLogger.log("memory_claim", "QuestGenAgent", {
+			"claim": c, "verified": ok_claim,
+		})
+	EvaluationLogger.log("quest_revised" if decision == "continue" else "orchestration_complete",
+			"QuestGenAgent", {
+		"decision": decision,
+		"prev_quest_id": String(prev_quest_summary.get("id","")),
+		"new_quest_id": String((out.get("new_quest", {}) as Dictionary).get("quest", {}).get("id","")) if decision == "continue" else "",
+		"wanderer_dialog_len": dialog_str.length(),
+		"memory_claim_count": claims.size(),
+		"model": model, "elapsed_ms": Time.get_ticks_msec() - t0,
+	})
 	return out
+
+# Subset-match a memory claim against the action ledger. A claim is valid
+# iff some ledger entry has the same `kind` AND every key in the claim's
+# `params` matches the ledger entry's params exactly.
+func _verify_memory_claim(claim: Dictionary, ledger: Array) -> bool:
+	var ck: String = String(claim.get("kind",""))
+	var cp: Dictionary = claim.get("params", {})
+	for entry in ledger:
+		if not (entry is Dictionary): continue
+		if String(entry.get("kind","")) != ck: continue
+		var ep: Dictionary = (entry as Dictionary).get("params", {})
+		var all_match := true
+		for k in cp.keys():
+			if String(ep.get(k, "")) != String(cp[k]):
+				all_match = false
+				break
+		if all_match:
+			return true
+	return false
 
 # Mid-quest continuation: small JSON pack of new_branches + dialog_patches
 # tied to a milestone event. Called by main._on_milestone after the engine

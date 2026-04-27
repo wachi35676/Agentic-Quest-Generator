@@ -1,5 +1,9 @@
 extends Node2D
 
+# Emitted once the world is fully spawned (player + all quest-givers).
+# The eval session driver waits on this before attaching scripted players.
+signal world_ready
+
 const TILE := 16
 const W := 40   # tiles
 const H := 30
@@ -47,7 +51,61 @@ func _ready() -> void:
 	_setup_dialog()
 	_setup_quest_log()
 	_setup_quest_agent()
-	call_deferred("_spawn_quest_givers")
+	call_deferred("_spawn_quest_givers_then_signal")
+
+func _spawn_quest_givers_then_signal() -> void:
+	_spawn_quest_givers()
+	# Defer one more frame so the spawned NPCs have run _ready before
+	# the eval session driver tries to find them.
+	await get_tree().process_frame
+	# Eval bootstrap: dump entity catalog + emit session_start AFTER the
+	# hand-placed NPCs exist so both records include their names.
+	if EvaluationLogger.is_enabled():
+		_eval_dump_entities()
+		EvaluationLogger.log("session_start", "main", {
+			"profile": EvaluationLogger.profile(),
+			"world_npcs": _hand_placed_npc_names(),
+		})
+	world_ready.emit()
+
+func _notification(what: int) -> void:
+	# Fire a session_end on any clean exit (window close, quit_request)
+	# so timeout-driven sessions still get a proper end record.
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+		if EvaluationLogger.is_enabled():
+			EvaluationLogger.log("session_end", "main", {
+				"reason": "window_close_or_predelete",
+				"duration_ms": Time.get_ticks_msec() - EvaluationLogger.start_ms(),
+			})
+			EvaluationLogger.flush()
+
+func _hand_placed_npc_names() -> Array:
+	var names: Array = []
+	for child in level_root.get_children():
+		if child is NPC and child.has_meta("quest_giver_kind"):
+			names.append((child as NPC).npc_name)
+	return names
+
+# Exports the closed-set entity catalog (item ids, character sheets,
+# position hints) plus the hand-placed NPC names to user://eval/entities.json
+# so the Python evaluator can cross-check string references.
+func _eval_dump_entities() -> void:
+	var data := {
+		"item_ids": WorldCatalog.item_ids(),
+		"character_sheets": WorldCatalog.character_sheets(),
+		"position_hints": WorldCatalog.POSITION_HINTS,
+		"objective_types": WorldCatalog.OBJECTIVE_TYPES,
+		"action_prefixes": WorldCatalog.ACTION_PREFIXES,
+		"action_bare": WorldCatalog.ACTION_BARE,
+		"hand_placed_npcs": _hand_placed_npc_names(),
+	}
+	var dir := DirAccess.open("user://")
+	if dir != null and not dir.dir_exists("eval"):
+		dir.make_dir("eval")
+	var f := FileAccess.open("user://eval/entities.json", FileAccess.WRITE)
+	if f != null:
+		f.store_string(JSON.stringify(data, "  "))
+		f.close()
 
 # Hand-placed quest-giver NPCs at known-walkable village coords (extracted
 # from the reference map_village's character spawns). Each NPC issues a
@@ -514,9 +572,25 @@ func _orchestrate_next_chapter(npc: NPC) -> void:
 			prev.get("title",""), (prev.get("branches", []) as Array).size()])
 	for entry in QuestManager.action_ledger:
 		print("  ledger: ", entry)
+	var t_replan := Time.get_ticks_msec()
+	var prev_quest_id: String = String(prev.get("id",""))
+	EvaluationLogger.log("replan_triggered", "main", {
+		"prev_quest_id": prev_quest_id,
+		"ledger_size": QuestManager.action_ledger.size(),
+		"talk_index": n + 1,
+		"remaining": remaining,
+	})
 	var r: Dictionary = await quest_agent.generate_orchestration(
 			prev, QuestManager.action_ledger, current, npc.npc_name, remaining)
 	_generating_for = null
+	EvaluationLogger.log("replan_completed", "main", {
+		"prev_quest_id": prev_quest_id,
+		"new_quest_id": String((r.get("new_quest", {}) as Dictionary).get("quest", {}).get("id",""))
+				if r.get("ok", false) and r.get("decision","") == "continue" else "",
+		"decision": String(r.get("decision","")),
+		"ok": r.get("ok", false),
+		"elapsed_ms": Time.get_ticks_msec() - t_replan,
+	})
 	if not r.get("ok", false):
 		print("[orchestrator] FAIL: ", r.get("error",""))
 		npc.memory["wanderer_state"] = "active"
@@ -614,6 +688,13 @@ func _close_active_quest(branch_label: String) -> void:
 		_quest_giver_for.erase(qid)
 
 func _finish_orchestrator_quest(npc: NPC, line: String, rewards: Array) -> void:
+	EvaluationLogger.log("session_end", "main", {
+		"reason": "orchestrator_complete",
+		"chapters_total": int(npc.memory.get("orchestration_count", 0)) + 1,
+		"duration_ms": Time.get_ticks_msec() - EvaluationLogger.start_ms(),
+		"rewards": rewards,
+	})
+	EvaluationLogger.flush()
 	_close_active_quest("orchestrator_closing")
 	for r in rewards:
 		if not (r is Dictionary): continue

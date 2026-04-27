@@ -115,9 +115,12 @@ static func validate(bundle: Dictionary, extra_known_npcs: Array = []) -> Array:
 	if String(quest.get("title","")).length() > 80:
 		errors.append("quest.title exceeds 80 chars")
 
+	# Continuation chapters are allowed to be smaller; relaxed from ≥3.
+	# The prompt still asks for 4-7 branches, but a 1-branch chapter is
+	# valid (e.g. "kill the assassin → report back").
 	var branches: Array = quest.get("branches", [])
-	if branches.size() < 3:
-		errors.append("quest.branches must have at least 3 entries (got %d)" % branches.size())
+	if branches.size() < 1:
+		errors.append("quest.branches must have at least 1 entry")
 	# fail_conditions are no longer required: orchestrator-managed quests
 	# bypass evaluate() entirely, so fail conditions are advisory at best
 	# and used to outright break the new Wanderer flow.

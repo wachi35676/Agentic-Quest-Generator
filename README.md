@@ -20,6 +20,7 @@ It's built in **Godot 4.6.2** with **GDScript**, and it can talk to **Groq** (pr
 - [Other quest-givers](#other-quest-givers)
 - [Lazy dialog expansion](#lazy-dialog-expansion)
 - [Constraints and guardrails](#constraints-and-guardrails)
+- [Evaluation](#evaluation)
 - [Running the project](#running-the-project)
 - [Project layout](#project-layout)
 

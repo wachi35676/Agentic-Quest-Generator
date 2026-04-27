@@ -1,0 +1,2 @@
+# tools/eval/runner.py uses only stdlib. This file is here for forward
+# compatibility — drop in `jsonschema` or `pandas` if/when needed.

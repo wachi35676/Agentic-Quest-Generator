@@ -167,10 +167,16 @@ func _physics_process(delta: float) -> void:
 			_play_idle()
 		return
 
-	var input := Vector2(
-		Input.get_action_strength("move_right") - Input.get_action_strength("move_left"),
-		Input.get_action_strength("move_down") - Input.get_action_strength("move_up")
-	)
+	# Scripted players poke `_scripted_dir` directly; otherwise read live
+	# input. Either source produces the same downstream movement code.
+	var input: Vector2
+	if _scripted_active:
+		input = _scripted_dir
+	else:
+		input = Vector2(
+			Input.get_action_strength("move_right") - Input.get_action_strength("move_left"),
+			Input.get_action_strength("move_down") - Input.get_action_strength("move_up")
+		)
 	if input.length() > 0.01:
 		var primary := input
 		if abs(primary.x) > abs(primary.y):
@@ -225,6 +231,29 @@ func _equipped_weapon() -> Dictionary:
 	if s.is_empty(): return {}
 	if not ItemDB.is_weapon(s.id): return {}
 	return s
+
+# --- Scripted-player public API ---
+# Used by tools/eval/ scripted player profiles to drive the game without
+# real input. These shadow the equivalent paths the keyboard handler uses.
+
+func scripted_set_velocity(dir: Vector2) -> void:
+	# `dir` is a unit vector (or zero). Multiplied by move_speed in the
+	# physics process; we just write the intent here.
+	_scripted_dir = dir.normalized() if dir.length() > 0.0 else Vector2.ZERO
+	_scripted_active = true
+
+func scripted_clear() -> void:
+	_scripted_dir = Vector2.ZERO
+	_scripted_active = false
+
+func scripted_attack() -> void:
+	_start_attack()
+
+func scripted_interact() -> void:
+	_try_interact()
+
+var _scripted_dir: Vector2 = Vector2.ZERO
+var _scripted_active: bool = false
 
 func _try_interact() -> void:
 	# Pickup has priority if any nearby
