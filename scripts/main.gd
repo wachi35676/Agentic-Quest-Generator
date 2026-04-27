@@ -21,6 +21,9 @@ var quest_agent: QuestGenAgent
 # share the same world setup as the original generation.
 var _current_premise: String = ""
 
+# Per-quest record of the originating quest-giver's NPC. Keyed by quest.id.
+var _quest_giver_for: Dictionary = {}
+
 func _ready() -> void:
 	randomize()
 	# Use the imported Ninja Adventure village as the world. The scene
@@ -74,7 +77,7 @@ func _spawn_quest_givers() -> void:
 	# vs ignore). The engine's existing dialog/flag system evaluates
 	# the graph; no branch logic is hand-coded here.
 	_spawn_quest_giver("Wanderer", "Monk", "wanderer", "branching",
-			Vector2(-160, 64),
+			Vector2(-288, -120),
 			"A travel-stained wanderer with a story behind their eyes.")
 
 func _spawn_quest_giver(npc_name: String, sheet: String, role: String,
@@ -89,9 +92,11 @@ func _spawn_quest_giver(npc_name: String, sheet: String, role: String,
 	# to the LLM flow instead of the default Talk/Give/Take menu.
 	n.set_meta("quest_giver_kind", kind)
 	level_root.add_child(n)
-	# Floating name label so the player can spot the giver from a distance.
-	var l := _label_at(pos + Vector2(0, -22), npc_name)
-	level_root.add_child(l)
+	# Floating name label as a CHILD of the NPC so it's freed automatically
+	# if the NPC ever is. Hand-placed quest-givers are invulnerable, but
+	# parenting keeps the pattern consistent with QuestSpawner.
+	var l := _label_at(Vector2(0, -22), npc_name)
+	n.add_child(l)
 
 # ---------- world ----------
 
@@ -364,6 +369,22 @@ func _setup_quest_agent() -> void:
 func _on_agent_progress(stage: String, detail: String) -> void:
 	hud.toast("[%s] %s" % [stage, detail], 1.5)
 
+# Names of all NPCs spawned by any active branching quest's bundle.
+# Walks level_root for NPC instances that lack quest_giver_kind meta
+# (those are the LLM-spawned ones, not our hand-placed givers).
+func _bundle_npc_names() -> Array:
+	var out: Array = []
+	for child in level_root.get_children():
+		if child is NPC and not child.has_meta("quest_giver_kind"):
+			out.append((child as NPC).npc_name)
+	return out
+
+func _find_npc_by_name(name: String) -> NPC:
+	for child in level_root.get_children():
+		if child is NPC and (child as NPC).npc_name == name:
+			return child
+	return null
+
 # Simple-quest flow per quest-giver NPC.
 # State stored on the NPC's `memory` dict:
 #   memory.quest_id     — id of the quest this NPC has issued (if any)
@@ -424,33 +445,47 @@ func _handle_quest_giver(npc: NPC) -> void:
 			"Still on the way? Hurry."))
 	dialog.show_actions(npc.npc_name, line2, ["Give", "Bye"])
 
-# Branching dynamic quest flow. The hand-placed Wanderer is just the
-# kickoff: a single click → big-bundle generation → QuestSpawner installs
-# everything. From that point on, the engine handles the entire quest via
-# its existing dialog-tree + branch system. Source code adds zero branch
-# logic — the LLM bundle defines all of it.
+# Wanderer-as-orchestrator flow. The Wanderer is the single source of
+# narrative truth: he gives the first chapter, decides whether each
+# subsequent player-talk yields a continuation or a closing, and never
+# auto-fails on unexpected actions.
 #
-# memory keys:
-#   branching_started - true once we've kicked off generation
+# State machine on `npc.memory`:
+#   wanderer_state       : "idle" | "active" | "closing"
+#   orchestration_count  : int  (number of continuations so far; capped)
+#   quest_id_branching   : id of the active chapter's Quest (for replace)
+
+const MAX_ORCHESTRATIONS := 5
+
 func _handle_branching(npc: NPC) -> void:
-	if bool(npc.memory.get("branching_started", false)):
-		# Quest already running — just close the dialog so the player
-		# isn't gated by the Wanderer; they should be talking to the
-		# spawned NPCs instead.
+	var state: String = String(npc.memory.get("wanderer_state", "idle"))
+	if state == "idle":
 		dialog.show_actions(npc.npc_name,
-				"Go on. The story isn't with me anymore — find them.",
+				"I have a tale brewing. Will you hear it?", ["Yes", "Bye"])
+		return
+	if state == "closing":
+		dialog.show_actions(npc.npc_name, "(reading the threads...)", [])
+		return
+	# state == "active"
+	if QuestManager.action_ledger.is_empty():
+		dialog.show_actions(npc.npc_name,
+				"You've done nothing of consequence. Walk, act, then return to me.",
 				["Bye"])
 		return
+	var n: int = int(npc.memory.get("orchestration_count", 0))
+	var remaining: int = max(0, MAX_ORCHESTRATIONS - n)
+	dialog.show_actions(npc.npc_name,
+			"Tell me what's happened. (%d chapters left)" % remaining,
+			["Report", "Bye"])
+
+# Generates the FIRST chapter from a fresh Wanderer talk.
+func _kickoff_first_chapter(npc: NPC) -> void:
 	if _generating_for != null:
-		dialog.show_actions(npc.npc_name,
-				"Wait. Another tale is still being spun.", ["Bye"])
+		dialog.show_actions(npc.npc_name, "Wait — another tale is still being spun.", ["Bye"])
 		return
 	_generating_for = npc
-	dialog.show_actions(npc.npc_name,
-			"Sit. Listen. Then decide for yourself.\n\n"
-			+ "(Conjuring a story... 30-90s)",
-			[])
-	hud.toast("[%s] weaving a branching tale (qwen3:14b)..." % npc.npc_name, 6.0)
+	dialog.show_actions(npc.npc_name, "(weaving the opening threads...)", [])
+	hud.toast("[%s] weaving the first chapter..." % npc.npc_name, 6.0)
 	var r: Dictionary = await quest_agent.generate_branching(npc.npc_name, npc.role)
 	_generating_for = null
 	if not r.get("ok", false):
@@ -459,18 +494,160 @@ func _handle_branching(npc: NPC) -> void:
 				"Words won't come tonight. (%s)" % err, ["Bye"])
 		print("[main] branching fail for %s: %s" % [npc.npc_name, err])
 		return
-	var bundle: Dictionary = r.bundle
-	# QuestSpawner instantiates the LLM-defined NPCs, scatters items,
-	# adds the multi-branch quest. Pass the Wanderer as `keep` so the
-	# wipe step doesn't delete our hand-placed quest-givers.
+	_install_chapter(npc, r.bundle, "✦ %s ✦")
+
+# Wanderer-talk after the player has acted: orchestration LLM call.
+func _orchestrate_next_chapter(npc: NPC) -> void:
+	if _generating_for != null:
+		dialog.show_actions(npc.npc_name, "Patience — the threads are still moving.", ["Bye"])
+		return
+	var n: int = int(npc.memory.get("orchestration_count", 0))
+	var remaining: int = max(0, MAX_ORCHESTRATIONS - n)
+	_generating_for = npc
+	npc.memory["wanderer_state"] = "closing"  # locked while in flight
+	dialog.show_actions(npc.npc_name, "(reading the threads...)", [])
+	var prev := _summarize_active_quest()
+	var current := _bundle_npc_names()
+	print("[orchestrator] talk #%d  ledger_size=%d  remaining=%d  current_npcs=%s" % [
+			n + 1, QuestManager.action_ledger.size(), remaining, str(current)])
+	print("[orchestrator] prev_quest title='%s'  branches=%d" % [
+			prev.get("title",""), (prev.get("branches", []) as Array).size()])
+	for entry in QuestManager.action_ledger:
+		print("  ledger: ", entry)
+	var r: Dictionary = await quest_agent.generate_orchestration(
+			prev, QuestManager.action_ledger, current, npc.npc_name, remaining)
+	_generating_for = null
+	if not r.get("ok", false):
+		print("[orchestrator] FAIL: ", r.get("error",""))
+		npc.memory["wanderer_state"] = "active"
+		dialog.show_actions(npc.npc_name,
+				"My sight failed me. Try again later. (%s)" % r.get("error",""),
+				["Bye"])
+		return
+	# Hard guardrails on top of LLM judgment.
+	var decision: String = String(r.decision)
+	var orig_decision: String = decision
+	if n >= MAX_ORCHESTRATIONS:
+		decision = "complete"
+	if decision == "complete" and QuestManager.action_ledger.size() < 2:
+		decision = "continue"
+	if decision == "continue" and not r.has("new_quest"):
+		decision = "complete"   # safety: bad pack
+	if decision != orig_decision:
+		print("[orchestrator] decision overridden: %s -> %s" % [orig_decision, decision])
+	print("[orchestrator] applying decision=%s  wanderer_dialog='%s'" % [
+			decision, String(r.wanderer_dialog).substr(0, 80)])
+	# Apply.
+	if decision == "continue":
+		var new_quest: Dictionary = r.new_quest
+		print("[orchestrator] new chapter: title='%s'  npcs=%d  branches=%d" % [
+				String(new_quest.get("quest", {}).get("title","?")),
+				(new_quest.get("npcs", []) as Array).size(),
+				(new_quest.get("quest", {}).get("branches", []) as Array).size()])
+		_close_active_quest("orchestrator_continuation")
+		_install_chapter(npc, new_quest, String(r.wanderer_dialog))
+		npc.memory["orchestration_count"] = n + 1
+	else:
+		_finish_orchestrator_quest(npc, String(r.wanderer_dialog), r.get("rewards", []))
+
+func _install_chapter(npc: NPC, bundle: Dictionary, intro_text: String) -> void:
+	var quest_dict: Dictionary = bundle.get("quest", {})
+	# Stamp the orchestrator-managed flag so QuestSpawner sets it on the
+	# registered Quest, disabling auto-completion.
+	quest_dict["orchestrator_managed"] = true
+	bundle["quest"] = quest_dict
 	QuestSpawner.spawn(bundle, level_root, player, _all_quest_givers())
-	npc.memory["branching_started"] = true
-	var qtitle: String = String(bundle.get("quest", {}).get("title", "A tale"))
-	var brs: Array = bundle.get("quest", {}).get("branches", [])
-	hud.toast("Quest accepted: %s (%d branches)" % [qtitle, brs.size()], 4.0)
-	dialog.show_actions(npc.npc_name,
-			"Walk. Talk. Or strike. Each path leads somewhere different.",
-			["Bye"])
+	npc.memory["wanderer_state"] = "active"
+	var qid: String = String(quest_dict.get("id",""))
+	if qid != "":
+		_quest_giver_for[qid] = npc.npc_name
+		npc.memory["quest_id_branching"] = qid
+	var qtitle: String = String(quest_dict.get("title","A tale"))
+	var qdesc: String = String(quest_dict.get("description",""))
+	var spawned: Array = []
+	for n2 in bundle.get("npcs", []):
+		spawned.append(String((n2 as Dictionary).get("npc_name","?")))
+	# Collect starting items the bundle scattered for the player so the
+	# Wanderer's intro mentions them — otherwise they look like random
+	# pickups the player has to figure out.
+	var starting_items: Array = []
+	for it in bundle.get("items", []):
+		var iid: String = String((it as Dictionary).get("id",""))
+		if iid != "": starting_items.append(iid)
+	var lore: String
+	if intro_text == "✦ %s ✦":
+		# First chapter: synthetic intro from the bundle.
+		lore = "✦ %s ✦\n\n%s" % [qtitle, qdesc]
+		if not spawned.is_empty():
+			lore += "\n\nYou may meet: " + ", ".join(spawned) + "."
+		if not starting_items.is_empty():
+			lore += "\n\nTake these — they may help: " + ", ".join(starting_items) + "."
+	else:
+		# Continuation: Wanderer's own LLM-authored line plus the new title.
+		lore = intro_text + "\n\n— Next chapter: %s —\n%s" % [qtitle, qdesc]
+		if not spawned.is_empty():
+			lore += "\n\nNow walking the world: " + ", ".join(spawned) + "."
+		if not starting_items.is_empty():
+			lore += "\n\nFresh tools left for you: " + ", ".join(starting_items) + "."
+	print("[main] chapter installed: '%s' npcs=%s items=%s" % [
+			qtitle, str(spawned), str(starting_items)])
+	hud.toast("Chapter accepted: %s" % qtitle, 4.0)
+	dialog.show_actions(npc.npc_name, lore, ["Accept"])
+
+# Closes whichever quest the Wanderer is currently shepherding. Clears
+# the giver-map entry for the closed quest so the next chapter starts
+# with a clean record.
+func _close_active_quest(branch_label: String) -> void:
+	# Single Wanderer assumption: the only branching giver in play. Use
+	# whichever qid maps from this giver in the registry.
+	var stale_qids: Array = []
+	for k in _quest_giver_for.keys():
+		stale_qids.append(String(k))
+	for qid in stale_qids:
+		var q := QuestManager.get_quest(qid)
+		if q != null and q.status == Quest.Status.ACTIVE:
+			q.status = Quest.Status.COMPLETED
+			q.completed_branch_id = branch_label
+			QuestManager.active_quests.erase(q)
+			QuestManager.completed_quests.append(q)
+			QuestManager.quest_completed.emit(q)
+		_quest_giver_for.erase(qid)
+
+func _finish_orchestrator_quest(npc: NPC, line: String, rewards: Array) -> void:
+	_close_active_quest("orchestrator_closing")
+	for r in rewards:
+		if not (r is Dictionary): continue
+		var iid: String = String((r as Dictionary).get("item_id",""))
+		var count: int = int((r as Dictionary).get("count", 1))
+		if ItemDB.has(iid) and count > 0:
+			player.inventory.add(iid, count)
+			hud.toast("+%d %s" % [count, iid], 2.0)
+	QuestManager.clear_ledger()
+	npc.memory["wanderer_state"] = "idle"
+	npc.memory["orchestration_count"] = 0
+	npc.memory.erase("quest_id_branching")
+	# Drop the spawned NPCs/items + any stranded floating Labels so the
+	# next quest starts on a clean slate. Labels are now child of their
+	# NPC; this Label sweep just defends against regressions.
+	for child in level_root.get_children():
+		if child is NPC and not child.has_meta("quest_giver_kind"):
+			child.queue_free()
+		elif child is ItemPickup:
+			child.queue_free()
+		elif child is Label:
+			child.queue_free()
+	for k in _quest_giver_for.keys():
+		_quest_giver_for.erase(k)
+	dialog.show_actions(npc.npc_name, line, ["Bye"])
+
+func _summarize_active_quest() -> Dictionary:
+	if QuestManager.active_quests.is_empty():
+		return {}
+	var q: Quest = QuestManager.active_quests[0]
+	var brs: Array = []
+	for b in q.branches:
+		brs.append({"id": b.id, "description": b.description})
+	return {"title": q.title, "description": q.description, "branches": brs}
 
 # Returns the set of hand-placed quest-givers so QuestSpawner's wipe step
 # preserves them when installing the bundle's LLM-spawned NPCs.
@@ -755,6 +932,17 @@ func _on_dialog_action(action: String) -> void:
 			dialog.show_inventory_picker(_current_npc.npc_name + " — take which?", "Pick an item to take", _current_npc.inventory)
 		"Accept", "Bye":
 			dialog.close_dialog()
+		"Yes":
+			# Wanderer kickoff: first chapter generation.
+			if _current_npc is NPC and _current_npc.has_meta("quest_giver_kind") \
+					and String(_current_npc.get_meta("quest_giver_kind")) == "branching":
+				_kickoff_first_chapter(_current_npc as NPC)
+		"Report":
+			# Wanderer orchestration: read the action ledger, generate
+			# a continuation chapter or a closing.
+			if _current_npc is NPC and _current_npc.has_meta("quest_giver_kind") \
+					and String(_current_npc.get_meta("quest_giver_kind")) == "branching":
+				_orchestrate_next_chapter(_current_npc as NPC)
 		"Path of Honor":
 			if _current_npc is NPC and _current_npc.has_meta("quest_giver_kind") \
 					and String(_current_npc.get_meta("quest_giver_kind")) == "two_stage":
@@ -806,9 +994,14 @@ func _open_dialog_node(node_id: String) -> void:
 	_dialog_node_id = node_id
 	var node: Dictionary = npc.dialog_tree[node_id]
 	var visible := npc.visible_choices(node_id, player, _npc_index())
-	dialog.show_node(npc.npc_name, node, visible)
-	# Prefetch deeper layers in the background so the player rarely waits.
-	_prefetch_expansions(npc, node_id, node)
+	# Always offer Give/Take so the player can transfer items to/from a
+	# dialog-tree NPC even when the writer didn't author item-transfer
+	# choices. main._on_dialog_action handles Give/Take by opening the
+	# inventory picker against the current NPC.
+	dialog.show_node(npc.npc_name, node, visible, ["Give", "Take"])
+	# (prefetch disabled — concurrent expand calls collide on the single
+	# HTTPRequest in the LLM client and produce noisy errors. Lazy
+	# expansion happens on-demand when the player picks a choice.)
 
 func _prefetch_expansions(npc: NPC, node_id: String, node: Dictionary) -> void:
 	if quest_agent == null:
@@ -879,6 +1072,19 @@ func _expand_and_navigate(npc: NPC, choice: Dictionary) -> void:
 	var ctx := _build_expand_context(npc, _dialog_node_id, choice)
 	var result: Dictionary = await quest_agent.expand_node(ctx)
 	var new_node: Dictionary = result.get("node", {"text":"...","choices":[]})
+	# Defensive: a parse-failure fallback comes back with empty choices,
+	# which collapses the dialog to just [Give]/[Take]/[Bye] and feels
+	# like the conversation dies mid-sentence. Inject a "Tell me more"
+	# follow-up that lazy-expands again so the player can keep pushing.
+	if (new_node.get("choices", []) as Array).is_empty():
+		new_node["choices"] = [{
+			"id": "tell_me_more",
+			"text": "Tell me more.",
+			"next": "__expand__",
+			"next_hint": "Continue the conversation from: " + String(new_node.get("text","")).substr(0, 80),
+		}]
+		print("[main] expand fallback: injected lazy 'Tell me more' (parent=%s, choice=%s)" % [
+				_dialog_node_id, String(choice.get("id",""))])
 	# Splice into the npc's dialog_tree under a stable id so revisits skip expansion.
 	var new_id: String = "%s__%s" % [_dialog_node_id, String(choice.get("id",""))]
 	npc.dialog_tree[new_id] = new_node
@@ -939,7 +1145,12 @@ func _run_dialog_action(npc: NPC, action: String) -> void:
 						npc.inventory.slots[i] = null
 				npc.inventory.changed.emit()
 			"die":
-				npc._die()
+				# Defer the death until after the dialog tree finishes
+				# resolving — calling _die() inline queue_free()'s the NPC
+				# while the dialog is still rendering choices, leaving the
+				# player stuck in a conversation with a dead reference.
+				hud.toast("%s has fallen." % String(npc.npc_name), 2.5)
+				npc.call_deferred("_die")
 
 func _on_dialog_closed() -> void:
 	_current_npc = null

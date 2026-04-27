@@ -11,6 +11,11 @@ signal quest_failed(quest: Quest)
 
 var active_quests: Array[Quest] = []
 var completed_quests: Array[Quest] = []
+# Story-significant player actions accumulated while a Wanderer-managed
+# (orchestrator) quest is active. Each entry: { kind, params, frame }.
+# Kept under cap so the orchestration prompt stays bounded.
+const _LEDGER_CAP := 20
+var action_ledger: Array = []
 
 # Global narrative flags shared across all quests + dialog gating. Dialog
 # `set_flag:k=v` writes here and onto every active quest's per-quest flags
@@ -66,12 +71,33 @@ func _on_npc_interacted(npc_name: String, action: String) -> void:
 	if action == "talk":
 		_dispatch("npc_talk", {"npc_name": npc_name})
 	elif action.begins_with("give:"):
-		_dispatch("npc_give", {"npc_name": npc_name, "item_id": action.substr(5)})
+		var iid: String = action.substr(5)
+		_dispatch("npc_give", {"npc_name": npc_name, "item_id": iid})
+		record_action("npc_give", {"npc_name": npc_name, "item_id": iid})
 	elif action.begins_with("take:"):
-		_dispatch("npc_take", {"npc_name": npc_name, "item_id": action.substr(5)})
+		var iid2: String = action.substr(5)
+		_dispatch("npc_take", {"npc_name": npc_name, "item_id": iid2})
+		record_action("npc_take", {"npc_name": npc_name, "item_id": iid2})
 
 func _on_npc_killed(npc_name: String) -> void:
 	_dispatch("npc_killed", {"npc_name": npc_name})
+	record_action("kill_npc", {"npc_name": npc_name})
+
+# Append a story-significant action to the ledger (capped at _LEDGER_CAP).
+# Wanderer's orchestration prompt reads this list as the player's expressed
+# creative intent — including unexpected actions, which the LLM is told to
+# fold into new plot threads rather than fail the quest.
+func record_action(kind: String, params: Dictionary) -> void:
+	action_ledger.append({
+		"kind": kind,
+		"params": params,
+		"frame": Engine.get_process_frames(),
+	})
+	if action_ledger.size() > _LEDGER_CAP:
+		action_ledger = action_ledger.slice(action_ledger.size() - _LEDGER_CAP)
+
+func clear_ledger() -> void:
+	action_ledger.clear()
 
 func _on_enemy_killed(enemy_type: String) -> void:
 	_dispatch("enemy_killed", {"enemy_type": enemy_type})
@@ -81,6 +107,7 @@ func _on_enemy_killed(enemy_type: String) -> void:
 func dialog_choice(npc_name: String, choice_id: String) -> void:
 	Game.dialog_choice.emit(npc_name, choice_id)
 	_dispatch("dialog_choice", {"npc_name": npc_name, "choice_id": choice_id})
+	record_action("dialog_choice", {"npc_name": npc_name, "choice_id": choice_id})
 
 func set_quest_flag(quest_id: String, key: String, value: Variant) -> void:
 	var q := get_quest(quest_id)
@@ -120,8 +147,11 @@ func state_match(req: Dictionary, player: Node = null, npcs_by_name: Dictionary 
 	if req.is_empty():
 		return true
 	for raw_key in req.keys():
-		var expected: String = String(req[raw_key])
-		var key: String = String(raw_key)
+		# str() handles any Variant safely — String() on a dict/array
+		# raises 'Nonexistent String constructor', which the LLM has
+		# triggered by emitting nested objects in `requires`.
+		var expected: String = str(req[raw_key])
+		var key: String = str(raw_key)
 		var prefix := ""
 		var rest: String = key
 		var ci := key.find(":")

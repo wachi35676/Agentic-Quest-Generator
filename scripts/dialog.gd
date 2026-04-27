@@ -115,15 +115,24 @@ func show_inventory_picker(title: String, body: String, inv: Inventory) -> void:
 
 # Show a tree dialog node. `node` is the dialog node dict; `choices` is
 # pre-filtered (gating already applied by caller).
-func show_node(title: String, node: Dictionary, choices: Array) -> void:
+func show_node(title: String, node: Dictionary, choices: Array, extra_actions: Array = []) -> void:
 	_title.text = title
 	_body.text = node.get("text", "")
 	_clear_buttons()
 	for c in choices:
 		var choice_dict: Dictionary = c
 		_make_button(c.get("text", "(silent)"), func(): choice_chosen.emit(choice_dict))
-	if choices.is_empty():
-		_make_button("Continue", close_dialog)
+	# Extra action buttons (Give/Take) so the player can hand items to a
+	# dialog-tree NPC even when the writer didn't include item-transfer
+	# choices. Click → action_chosen("Give"|"Take") → main routes to the
+	# standard inventory picker.
+	for label in extra_actions:
+		var lbl: String = String(label)
+		_make_button("[%s]" % lbl, func(): action_chosen.emit(lbl))
+	# Always offer a way out so the player isn't locked in if the dialog
+	# choices are gated away or only Give/Take remain. Close shuts the
+	# dialog without firing any action.
+	_make_button("[Bye]", close_dialog)
 	visible = true
 
 func _clear_buttons() -> void:

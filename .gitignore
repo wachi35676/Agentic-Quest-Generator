@@ -9,3 +9,5 @@ export_presets.cfg
 Thumbs.db
 desktop.ini
 .DS_Store
+
+.env

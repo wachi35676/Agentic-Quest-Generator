@@ -69,6 +69,10 @@ var flags: Dictionary = {}
 var status: int = Status.ACTIVE
 var completed_branch_id: String = ""   # "main" if primary path; else branch id
 var failed_objective_summary: String = ""
+# Free-form scratchpad. Used by the continuation system to count regens
+# (`continuations` int) and remember the original bundle's NPC/item refs
+# so each splice stays consistent with the world.
+var meta: Dictionary = {}
 
 static func from_dict(d: Dictionary) -> Quest:
 	var q := Quest.new()
@@ -154,6 +158,12 @@ func evaluate() -> Dictionary:
 	# Branches and the primary path are checked BEFORE fail conditions so a
 	# branch whose flags happen to be set wins over a fail-trigger event
 	# (e.g. side_with_bandit beats the kill-Elder fail).
+	#
+	# Orchestrator-managed quests (Wanderer-driven) DON'T self-terminate.
+	# Closure happens only when the player talks to the Wanderer and the
+	# LLM emits decision="complete". Until then, branches are advisory.
+	if bool(meta.get("orchestrator_managed", false)):
+		return {"state": "active"}
 	for b in available_branches():
 		if b.is_complete():
 			return {"state": "completed", "branch_id": b.id, "rewards": b.rewards}

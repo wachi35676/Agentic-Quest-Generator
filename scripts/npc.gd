@@ -71,7 +71,10 @@ static func from_dict(d: Dictionary) -> NPC:
 	n.npc_name = String(d.get("npc_name", "Stranger"))
 	n.character_sheet = String(d.get("character_sheet", "Villager"))
 	n.role = String(d.get("role", ""))
-	n.max_health = int(d.get("max_health", 3))
+	# Clamp max_health: LLM bundles often emit 5+ which makes NPCs feel
+	# unkillable with the basic sword (1 dmg per swing = 5 hits + lock).
+	# Cap at 3 so 3 hits drops them — feels responsive.
+	n.max_health = clamp(int(d.get("max_health", 3)), 1, 3)
 	n.initial_items = d.get("initial_items", [])
 	n.dialog_tree = d.get("dialog_tree", {})
 	n.start_nodes = d.get("start_nodes", [])
@@ -125,10 +128,18 @@ func _build_hurtbox() -> void:
 	add_child(_hurtbox)
 
 func _on_hurt(damage: int, _source: Node) -> void:
+	# Hand-placed quest-givers are plot-essential and shrug off attacks.
+	# Without this, an errant swing softlocks the quest by triggering
+	# whatever kill_npc:<name> fail condition the LLM emitted.
+	if has_meta("quest_giver_kind"):
+		_flash()
+		return
 	health = max(0, health - damage)
 	_flash()
 	if health <= 0:
-		_die()
+		# Defer so we don't toggle Area2D monitoring state from inside
+		# the physics signal that brought us here (Godot warns/errors).
+		call_deferred("_die")
 
 func _flash() -> void:
 	_sprite.modulate = Color(1, 0.4, 0.4)

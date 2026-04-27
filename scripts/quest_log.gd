@@ -108,6 +108,16 @@ func _quest_block(q: Quest, _done: bool) -> Control:
 		hdr.add_theme_color_override("font_color", hdr_color)
 		hdr.add_theme_font_size_override("font_size", 11)
 		box.add_child(hdr)
+		# Branch description (the LLM's narrative blurb) right under the header.
+		var desc_str: String = String(b.description) if "description" in b else ""
+		if desc_str != "":
+			var d := Label.new()
+			d.text = "        " + desc_str
+			d.add_theme_color_override("font_color", Color(0.85, 0.85, 0.85) if avail else Color(0.45, 0.45, 0.45))
+			d.add_theme_font_size_override("font_size", 10)
+			d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			d.custom_minimum_size = Vector2(220, 0)
+			box.add_child(d)
 		for o in b.objectives:
 			box.add_child(_objective_label(o, "        "))
 	return box

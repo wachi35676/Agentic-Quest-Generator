@@ -18,10 +18,17 @@ signal failed(reason: String)
 const MAX_REPAIRS := 6
 const FALLBACK_FIXTURE := "res://tests/fixtures/heirloom_quest.json"
 
-@export var model: String = "qwen3:14b"
-# Lazy expansions of single nodes use a smaller, faster model by default.
-# 14B is overkill for a single ~150-word node and would block the player.
-@export var expand_model: String = "qwen3:4b"
+# Switched to Groq for fast LPU-backed inference. gpt-oss-120b is the
+# preferred high-quality option but is project-blocked on the user's
+# free tier — flip back once it's enabled in the Groq console.
+# llama-3.3-70b-versatile is throttled at 12K TPM on the free tier,
+# which our ~7K-token branching prompt blows past after two calls.
+# llama-3.1-8b-instant has a much wider TPM ceiling and stays reliable.
+# 70b accepts our ~7K-token branching prompt; 8b's per-request cap is
+# 6K, which 413s on the full bundle.  8b handles the smaller schemas
+# (expansion, simple-quest, continuation) where the prompt fits.
+@export var model: String = "llama-3.3-70b-versatile"
+@export var expand_model: String = "llama-3.1-8b-instant"
 
 # Cache key = "<npc_name>|<parent_node>|<choice_id>" -> Dictionary node.
 var _expand_cache: Dictionary = {}
@@ -32,23 +39,32 @@ var _inflight: Dictionary = {}
 
 signal _expand_ready(key: String, node: Dictionary)
 
-var _client: OllamaClient
+# Caller-supplied NPC names that exist in the world but not in the
+# bundle's npcs[] (e.g. the hand-placed quest-giver). Forwarded to the
+# validator so objectives may reference them without errors.
+var _extra_known: Array = []
+
+var _client: CompositeClient
 
 func _ready() -> void:
-	_client = OllamaClient.new()
+	# Composite client tries Groq first (fast), falls back to Gemini
+	# when Groq returns daily/per-minute quota errors. Keeps the game
+	# playable past Groq's 100K-tokens/day shared-org cap.
+	_client = CompositeClient.new()
 	add_child(_client)
 	_client.progress.connect(func(stage, elapsed):
 		progress.emit(stage, "%.0fs" % elapsed))
 
 # Async. Returns Dictionary {ok, bundle, error}.
 func generate(premise: String) -> Dictionary:
+	_extra_known = []
 	var system := LlmPrompts.build_system_prompt()
 	var user := premise.strip_edges()
 	if user == "":
 		user = LlmPrompts.DEFAULT_PREMISE
 	print("[agent] starting generation with model=", model)
 	progress.emit("calling", model)
-	var resp := await _client.generate(model, system, user)
+	var resp := await _client.generate(model, system, user, {"num_predict": 4096})
 	if not resp.ok:
 		print("[agent] transport failure: ", resp.error)
 		failed.emit(resp.error)
@@ -72,7 +88,8 @@ func generate(premise: String) -> Dictionary:
 			progress.emit("repairing", "%d/%d" % [attempt + 1, MAX_REPAIRS])
 			attempt += 1
 			var repair_resp := await _client.generate(model, system,
-					user + "\n\n" + LlmPrompts.build_repair_prompt(parse_errs))
+					user + "\n\n" + LlmPrompts.build_repair_prompt(parse_errs),
+					{"num_predict": 4096})
 			if not repair_resp.ok:
 				print("[agent] repair transport failed: ", repair_resp.error)
 				failed.emit(repair_resp.error)
@@ -81,14 +98,14 @@ func generate(premise: String) -> Dictionary:
 			continue
 
 		var bundle: Dictionary = parse.bundle
-		var san: Dictionary = QuestSanitizer.sanitize(bundle)
+		var san: Dictionary = QuestSanitizer.sanitize(bundle, _extra_known)
 		bundle = san.bundle
 		var fixes: Array = san.notes
 		if not fixes.is_empty():
 			print("[agent] sanitizer applied %d fixes:" % fixes.size())
 			for i in range(min(fixes.size(), 12)):
 				print("  ~ ", fixes[i])
-		var errs: Array = QuestValidator.validate(bundle)
+		var errs: Array = QuestValidator.validate(bundle, _extra_known)
 		if errs.is_empty():
 			print("[agent] VALID bundle on attempt %d. quest.id=%s, branches=%d, npcs=%d" % [attempt + 1,
 					String(bundle.get("quest",{}).get("id","?")),
@@ -107,7 +124,8 @@ func generate(premise: String) -> Dictionary:
 		progress.emit("repairing", "%d/%d" % [attempt + 1, MAX_REPAIRS])
 		attempt += 1
 		var rresp := await _client.generate(model, system,
-				user + "\n\n" + LlmPrompts.build_repair_prompt(errs))
+				user + "\n\n" + LlmPrompts.build_repair_prompt(errs),
+				{"num_predict": 4096})
 		if not rresp.ok:
 			print("[agent] repair transport failed: ", rresp.error)
 			failed.emit(rresp.error)
@@ -265,12 +283,13 @@ func generate_simple(npc_name: String, npc_role: String, kind: String, hint: Str
 # generate() — just with a stronger system prompt encouraging
 # action-driven branching.
 func generate_branching(quest_giver_name: String, quest_giver_role: String) -> Dictionary:
+	_extra_known = [quest_giver_name]
 	var system := LlmPrompts.build_branching_system_prompt(quest_giver_name, quest_giver_role)
 	var user := "Quest-giver: %s (role %s). Build the dynamic branching quest now. Single JSON object." % [
 			quest_giver_name, quest_giver_role]
 	print("[agent] starting branching generation for ", quest_giver_name)
 	progress.emit("calling", model)
-	var resp := await _client.generate(model, system, user)
+	var resp := await _client.generate(model, system, user, {"num_predict": 4096})
 	if not resp.ok:
 		return {"ok": false, "error": resp.error}
 	var attempt := 0
@@ -284,17 +303,18 @@ func generate_branching(quest_giver_name: String, quest_giver_role: String) -> D
 			attempt += 1
 			progress.emit("repairing", "%d/%d" % [attempt, MAX_REPAIRS])
 			var rr := await _client.generate(model, system,
-					user + "\n\n" + LlmPrompts.build_repair_prompt([parse.error]))
+					user + "\n\n" + LlmPrompts.build_repair_prompt([parse.error]),
+					{"num_predict": 4096})
 			if not rr.ok: return {"ok": false, "error": rr.error}
 			last_text = rr.text
 			_dump_raw(last_text, "branching_repair_%d" % attempt)
 			continue
 		var bundle: Dictionary = parse.bundle
-		var san: Dictionary = QuestSanitizer.sanitize(bundle)
+		var san: Dictionary = QuestSanitizer.sanitize(bundle, _extra_known)
 		bundle = san.bundle
 		if not san.notes.is_empty():
 			print("[agent] branching sanitizer: %d fixes" % san.notes.size())
-		var errs: Array = QuestValidator.validate(bundle)
+		var errs: Array = QuestValidator.validate(bundle, _extra_known)
 		if errs.is_empty():
 			print("[agent] branching VALID on attempt %d" % (attempt + 1))
 			progress.emit("ready", "")
@@ -306,11 +326,124 @@ func generate_branching(quest_giver_name: String, quest_giver_role: String) -> D
 		attempt += 1
 		progress.emit("repairing", "%d/%d" % [attempt, MAX_REPAIRS])
 		var rr2 := await _client.generate(model, system,
-				user + "\n\n" + LlmPrompts.build_repair_prompt(errs))
+				user + "\n\n" + LlmPrompts.build_repair_prompt(errs),
+				{"num_predict": 4096})
 		if not rr2.ok: return {"ok": false, "error": rr2.error}
 		last_text = rr2.text
 		_dump_raw(last_text, "branching_repair_%d" % attempt)
 	return {"ok": false, "error": "internal"}
+
+# Wanderer-orchestrator call: reads action_ledger, returns either a
+# continuation (full new quest bundle) or a closing (rewards + dialog).
+# Returns Dictionary {ok, decision, wanderer_dialog, new_quest?, rewards?, error}.
+func generate_orchestration(prev_quest_summary: Dictionary, ledger: Array,
+		current_npc_names: Array, quest_giver_name: String,
+		max_remaining: int) -> Dictionary:
+	_extra_known = current_npc_names.duplicate()
+	if not (quest_giver_name in _extra_known):
+		_extra_known.append(quest_giver_name)
+	var system := LlmPrompts.build_orchestration_system_prompt(
+			quest_giver_name, current_npc_names, max_remaining)
+	var user := LlmPrompts.build_orchestration_user_prompt(prev_quest_summary, ledger)
+	progress.emit("orchestrating", quest_giver_name)
+	var resp := await _client.generate(model, system, user, {"num_predict": 4096}, "json")
+	if not resp.ok:
+		return {"ok": false, "error": resp.error}
+	_dump_raw(resp.text, "orchestration")
+	var p: Variant = _extract_first_json(resp.text)
+	if not (p is Dictionary):
+		return {"ok": false, "error": "could not extract JSON"}
+	var d: Dictionary = p
+	var decision: String = String(d.get("decision","")).to_lower()
+	if decision != "continue" and decision != "complete":
+		return {"ok": false, "error": "decision must be 'continue' or 'complete' (got '%s')" % decision}
+	var dialog_str: String = String(d.get("wanderer_dialog",""))
+	if dialog_str.strip_edges() == "":
+		dialog_str = ("Words won't come tonight." if decision == "continue"
+				else "It is finished, traveler.")
+	var out: Dictionary = {"ok": true, "decision": decision, "wanderer_dialog": dialog_str}
+	if decision == "continue":
+		var new_quest: Variant = d.get("new_quest", null)
+		if not (new_quest is Dictionary):
+			return {"ok": false, "error": "decision=continue but new_quest missing"}
+		var nq: Dictionary = new_quest
+		# Sanitize + validate the embedded bundle. Pass extra_known so
+		# objectives may reference the Wanderer (already exists) without
+		# being dropped by the validator.
+		var san: Dictionary = QuestSanitizer.sanitize(nq, _extra_known)
+		nq = san.bundle
+		if not san.notes.is_empty():
+			print("[agent] orchestration sanitizer: %d fixes" % san.notes.size())
+		# Hard rule: continuation MUST include at least one new NPC the
+		# player can interact with. Empty npcs[] leaves nothing for the
+		# player to do beyond re-talking to surviving NPCs.
+		var fresh_npcs: Array = nq.get("npcs", [])
+		if fresh_npcs.is_empty():
+			print("[agent] orchestration rejected: continuation new_quest has no fresh NPCs")
+			return {"ok": false, "error": "continuation must spawn at least 1 fresh NPC"}
+		var errs: Array = QuestValidator.validate(nq, _extra_known)
+		if not errs.is_empty():
+			print("[agent] orchestration validation failed (%d errs); first: %s" % [errs.size(), errs[0]])
+			return {"ok": false, "error": "validation: %s" % errs[0]}
+		out["new_quest"] = nq
+	else:
+		var rewards: Variant = d.get("rewards", [])
+		if not (rewards is Array):
+			rewards = []
+		out["rewards"] = rewards
+	print("[agent] orchestration VALID (decision=%s)" % decision)
+	return out
+
+# Mid-quest continuation: small JSON pack of new_branches + dialog_patches
+# tied to a milestone event. Called by main._on_milestone after the engine
+# fires npc_killed / npc_give. Uses the fast model since the schema is
+# small. 1 attempt + up to 2 repair retries (less aggressive than the big
+# bundle to keep mid-action latency low).
+func generate_continuation(quest_summary: Dictionary, quest_giver_name: String,
+		current_npc_names: Array, event_kind: String, event_payload: Dictionary) -> Dictionary:
+	_extra_known = current_npc_names.duplicate()
+	if not (quest_giver_name in _extra_known):
+		_extra_known.append(quest_giver_name)
+	var system := LlmPrompts.build_continuation_system_prompt(quest_giver_name, current_npc_names)
+	var user := LlmPrompts.build_continuation_user_prompt(quest_summary, event_kind, event_payload)
+	progress.emit("continuation", event_kind)
+	var opts := {"num_predict": 1024}
+	var attempt := 0
+	var last_text := ""
+	while attempt <= 2:
+		var resp: Dictionary
+		if attempt == 0:
+			resp = await _client.generate(expand_model, system, user, opts, "json")
+		else:
+			progress.emit("repairing-cont", "%d/2" % attempt)
+			resp = await _client.generate(expand_model, system,
+					user + "\n\n" + LlmPrompts.build_repair_prompt([_last_cont_err]),
+					opts, "json")
+		if not resp.ok:
+			return {"ok": false, "error": resp.error}
+		last_text = resp.text
+		_dump_raw(last_text, "continuation_%s_%d" % [event_kind, attempt])
+		var p: Variant = _extract_first_json(last_text)
+		if not (p is Dictionary):
+			_last_cont_err = "could not extract JSON object"
+			attempt += 1
+			continue
+		var pack: Dictionary = p
+		var san: Dictionary = QuestSanitizer.sanitize_continuation(pack, current_npc_names + [quest_giver_name])
+		pack = san.bundle
+		if not san.notes.is_empty():
+			print("[agent] continuation sanitizer: %d fixes" % san.notes.size())
+		var errs: Array = QuestValidator.validate_continuation(pack, current_npc_names + [quest_giver_name])
+		if errs.is_empty():
+			print("[agent] continuation VALID on attempt %d (kind=%s)" % [attempt + 1, event_kind])
+			return {"ok": true, "pack": pack}
+		print("[agent] continuation validate failed (%d errors)" % errs.size())
+		for i in range(min(errs.size(), 4)): print("  - ", errs[i])
+		_last_cont_err = String(errs[0])
+		attempt += 1
+	return {"ok": false, "error": "validation failed: " + _last_cont_err}
+
+var _last_cont_err: String = ""
 
 # Two-stage quest, stage 1: fetch with extra "this is half a story" framing.
 func generate_stage1(npc_name: String, npc_role: String) -> Dictionary:

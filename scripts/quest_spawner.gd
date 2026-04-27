@@ -38,17 +38,60 @@ static func spawn(bundle: Dictionary, level_root: Node, player: Node, storytelle
 		used_positions.append(pos)
 		n.position = pos
 		level_root.add_child(n)
-		# Floating name label above the sprite so the player can spot NPCs
-		# even when they're at the level's edge.
-		level_root.add_child(_label_at(pos + Vector2(0, -22), n.npc_name))
-	# 4. Spawn world items.
+		# Floating name label as a CHILD of the NPC (relative offset).
+		# Adding to level_root as a sibling worked but left orphan labels
+		# floating on the map after the NPC was freed during a chapter
+		# change — _wipe only frees NPC/ItemPickup nodes, not Controls.
+		var label := _label_at(Vector2(0, -22), n.npc_name)
+		n.add_child(label)
+	# 4. Spawn world items — only those relevant to the quest. Models often
+	# dump every catalog id with position_hint:center, which floods the
+	# screen. Filter to items referenced in any quest objective, plus
+	# items inside spawned NPC inventories. Cap total to 5.
+	var relevant: Dictionary = _collect_relevant_item_ids(bundle)
+	var spawned: int = 0
 	for item_dict in bundle.get("items", []):
+		if spawned >= 5:
+			break
 		var id: String = String(item_dict.get("id",""))
 		if not ItemDB.has(id):
+			continue
+		# If we have ANY relevant items, only spawn those. Otherwise
+		# spawn all (fallback for quests that don't reference items).
+		if not relevant.is_empty() and not relevant.has(id):
 			continue
 		var pos := _resolve_position(String(item_dict.get("position_hint","center")), player)
 		pos = _avoid_collision(pos, used_positions)
 		ItemPickup.spawn(level_root, id, int(item_dict.get("count", 1)), pos)
+		spawned += 1
+	# 5. Finally — register the quest itself with the manager. Without this,
+	# QuestManager.active_quests stays empty and Tab shows "no quests yet".
+	# When the bundle is delivered through the Wanderer-orchestrator flow,
+	# bundle.quest.orchestrator_managed=true on the dict; the engine then
+	# disables auto-completion so the Wanderer is the only one who can
+	# close the quest.
+	var quest_dict: Dictionary = bundle.get("quest", {})
+	var q := QuestManager.add_quest_from_dict(quest_dict)
+	if bool(quest_dict.get("orchestrator_managed", false)):
+		q.meta["orchestrator_managed"] = true
+	print("[spawner] registered quest '%s' (id=%s, branches=%d, orchestrator=%s)" % [
+			q.title, q.id, q.branches.size(),
+			str(q.meta.get("orchestrator_managed", false))])
+
+static func _collect_relevant_item_ids(bundle: Dictionary) -> Dictionary:
+	var ids: Dictionary = {}
+	var quest: Dictionary = bundle.get("quest", {})
+	for o in quest.get("objectives", []):
+		var iid: String = String((o.get("params", {}) as Dictionary).get("item_id",""))
+		if iid != "": ids[iid] = true
+	for b in quest.get("branches", []):
+		for o in b.get("objectives", []):
+			var iid2: String = String((o.get("params", {}) as Dictionary).get("item_id",""))
+			if iid2 != "": ids[iid2] = true
+		for r in b.get("rewards", []):
+			var rid: String = String((r as Dictionary).get("item_id",""))
+			if rid != "": ids[rid] = true
+	return ids
 	# 5. Add the quest itself.
 	QuestManager.add_quest_from_dict(bundle.get("quest", {}))
 
@@ -59,33 +102,41 @@ static func _wipe(level_root: Node, keep_set: Dictionary) -> void:
 			continue
 		if child is NPC or child is ItemPickup:
 			to_free.append(child)
+		# Sweep stranded floating labels. Labels are now parented to NPCs
+		# but pre-fix builds may leave orphan Controls in level_root, and
+		# defending against future regressions is cheap.
+		elif child is Label:
+			to_free.append(child)
 	for c in to_free:
 		c.queue_free()
+	print("[spawner] wiped %d nodes (kept %d hand-placed)" % [to_free.size(), keep_set.size()])
 
 static func _resolve_position(hint: String, player: Node) -> Vector2:
-	# Pull positions in toward the centre so NPCs stay in the playable
-	# field instead of being lost in the corners (especially the SE combat
-	# arena pen). Positions are within ~6 tiles of where the player can
-	# walk; the camera (2× zoom) reveals each as the player approaches.
-	var cx := W * TILE / 2.0
-	var cy := H * TILE / 2.0
-	var dx := 8.0 * TILE   # 128 px from centre on the X axis
-	var dy := 6.0 * TILE   # 96 px from centre on the Y axis
+	# Spawn around the player — they're standing next to the quest-giver
+	# at accept time, so this clusters the spawned NPCs near where the
+	# story kicked off. The Wanderer's new location at (-288, -120) has
+	# walkable grass on its east/south side; pre-existing edges that
+	# were tree-bound are no longer at the spawn anchor.
+	var origin: Vector2 = Vector2(64, 48)
+	if player != null and "global_position" in player:
+		origin = player.global_position
+	# Compass offsets in pixels (~ 4-7 tiles from the player). Far enough
+	# that NPCs feel "out there" but close enough they're discoverable
+	# via short exploration in any direction.
+	var d_near: float = 64.0     # 4 tiles
+	var d_far: float  = 112.0    # 7 tiles
 	match hint:
-		"nw": return Vector2(cx - dx, cy - dy)
-		"ne": return Vector2(cx + dx, cy - dy)
-		"sw": return Vector2(cx - dx, cy + dy)
-		"se": return Vector2(cx + dx - 4 * TILE, cy + dy - 2 * TILE)   # nudge clear of arena pen
-		"n":  return Vector2(cx,       cy - dy)
-		"s":  return Vector2(cx,       cy + dy - 2 * TILE)
-		"e":  return Vector2(cx + dx,  cy)
-		"w":  return Vector2(cx - dx,  cy)
-		"center": return Vector2(cx, cy)
-		"near_player":
-			if player != null and "global_position" in player:
-				return player.global_position + Vector2(28, 0)
-			return Vector2(cx, cy)
-	return Vector2(cx, cy)
+		"nw": return origin + Vector2(-d_far, -d_near)
+		"ne": return origin + Vector2( d_far, -d_near)
+		"sw": return origin + Vector2(-d_far,  d_near)
+		"se": return origin + Vector2( d_far,  d_near)
+		"n":  return origin + Vector2(0,      -d_far)
+		"s":  return origin + Vector2(0,       d_far)
+		"e":  return origin + Vector2( d_far,  0)
+		"w":  return origin + Vector2(-d_far,  0)
+		"center": return origin
+		"near_player": return origin + Vector2(28, 0)
+	return origin
 
 static func _avoid_collision(pos: Vector2, used: Array) -> Vector2:
 	# Nudge the spawn point if another NPC/item already claimed the spot.

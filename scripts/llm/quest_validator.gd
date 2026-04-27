@@ -7,7 +7,69 @@ extends RefCounted
 # Same rules used by the live game and the offline fixture tests, so a
 # fixture that passes here is guaranteed loadable.
 
-static func validate(bundle: Dictionary) -> Array:
+# Continuation pack validator. Smaller schema than the full bundle;
+# reuses the same per-objective/predicate helpers. Returns Array of error
+# strings. extra_known_npcs is the set of NPC names that may be referenced.
+static func validate_continuation(pack: Dictionary, extra_known_npcs: Array) -> Array:
+	var errors: Array = []
+	var npcs: Dictionary = {}
+	for nm in extra_known_npcs: npcs[String(nm)] = true
+	var item_set := {}
+	for id in WorldCatalog.item_ids(): item_set[id] = true
+	var obj_type_set := {}
+	for t in WorldCatalog.OBJECTIVE_TYPES: obj_type_set[t] = true
+	var action_prefix_set := {}
+	for a in WorldCatalog.ACTION_PREFIXES: action_prefix_set[a] = true
+	var action_bare_set := {}
+	for a in WorldCatalog.ACTION_BARE: action_bare_set[a] = true
+	var pred_prefix_set := {}
+	for p in WorldCatalog.PREDICATE_PREFIXES: pred_prefix_set[p] = true
+	var seen_branch_ids := {}
+	for b in pack.get("new_branches", []):
+		var bid: String = String(b.get("id",""))
+		if bid == "":
+			errors.append("cont: a branch is missing 'id'")
+		elif seen_branch_ids.has(bid):
+			errors.append("cont: duplicate branch id '%s'" % bid)
+		else:
+			seen_branch_ids[bid] = true
+		if (b.get("objectives", []) as Array).is_empty():
+			errors.append("cont: branch '%s' has no objectives" % bid)
+		if (b.get("rewards", []) as Array).is_empty():
+			errors.append("cont: branch '%s' has no rewards" % bid)
+		for o in b.get("objectives", []):
+			_check_objective(o, obj_type_set, item_set, npcs, errors)
+		for r in b.get("rewards", []):
+			_check_reward(r, item_set, errors)
+	# dialog_patches
+	for patch in pack.get("dialog_patches", []):
+		var nm: String = String(patch.get("npc_name",""))
+		if not npcs.has(nm):
+			errors.append("cont: dialog_patch references unknown npc '%s'" % nm)
+			continue
+		var nodes: Variant = patch.get("new_nodes", {})
+		if not (nodes is Dictionary):
+			errors.append("cont: dialog_patch.new_nodes must be a dict")
+			continue
+		var node_ids := {}
+		for nid in (nodes as Dictionary).keys():
+			node_ids[String(nid)] = true
+			var node: Dictionary = (nodes as Dictionary)[nid]
+			for c in node.get("choices", []):
+				_check_predicates(c.get("requires", {}), pred_prefix_set, "", item_set, npcs,
+						"cont patch '%s' choice" % nm, errors)
+				for a in c.get("actions", []):
+					_check_action(String(a), action_prefix_set, action_bare_set, item_set,
+							"cont patch '%s' choice action" % nm, errors)
+		for sn in patch.get("new_start_nodes", []):
+			var nid2: String = String(sn.get("node",""))
+			if not node_ids.has(nid2):
+				errors.append("cont patch '%s' start_node '%s' is not in new_nodes" % [nm, nid2])
+			_check_predicates(sn.get("requires", {}), pred_prefix_set, "", item_set, npcs,
+					"cont patch '%s' start_nodes" % nm, errors)
+	return errors
+
+static func validate(bundle: Dictionary, extra_known_npcs: Array = []) -> Array:
 	var errors: Array = []
 
 	if not bundle.has("quest"):
@@ -56,9 +118,10 @@ static func validate(bundle: Dictionary) -> Array:
 	var branches: Array = quest.get("branches", [])
 	if branches.size() < 3:
 		errors.append("quest.branches must have at least 3 entries (got %d)" % branches.size())
-	var fails: Array = quest.get("fail_conditions", [])
-	if fails.size() < 1:
-		errors.append("quest.fail_conditions must have at least 1 entry")
+	# fail_conditions are no longer required: orchestrator-managed quests
+	# bypass evaluate() entirely, so fail conditions are advisory at best
+	# and used to outright break the new Wanderer flow.
+	var _fails: Array = quest.get("fail_conditions", [])
 
 	# Branch ids unique + each has rewards + objectives
 	var seen_branch_ids := {}
@@ -85,12 +148,16 @@ static func validate(bundle: Dictionary) -> Array:
 			errors.append("duplicate npc_name '%s'" % name)
 		else:
 			npc_names[name] = true
+	# Caller-supplied NPCs that exist in the world but not in npcs[]
+	# (e.g. the hand-placed quest-giver). Objectives may reference them.
+	for extra in extra_known_npcs:
+		npc_names[String(extra)] = true
 
 	# --- objectives across primary + branches + fails ---
 	var all_obj_lists := [quest.get("objectives", [])]
 	for b in branches:
 		all_obj_lists.append(b.get("objectives", []))
-	all_obj_lists.append(fails)
+	all_obj_lists.append(_fails)
 	for objs in all_obj_lists:
 		for o in objs:
 			_check_objective(o, obj_type_set, item_set, npc_names, errors)
