@@ -896,6 +896,15 @@ Outputs:
 - `tools/eval/results/results.json` — per-session metrics (one record per session, with `null` for metrics that didn't fire)
 - `tools/eval/results/results.csv` — same data, flat columns, ready for pandas/Excel
 - `tools/eval/results/summary.json` — means across all sessions, with `n_count` showing how many sessions contributed
+- `tools/eval/results/summary_per_profile.json` — same statistics broken down by profile (aggressive / cautious / explorer / completionist)
+- `tools/eval/results/headline.json` — paper-grade headline numbers: each metric's mean, stdev, median, and 95% bootstrap CI ($B = 1000$)
+
+To produce paper-ready tables (Markdown + LaTeX):
+
+```bash
+python tools/eval/make_paper_tables.py
+# Writes headline_table.{md,tex} and per_profile_table.{md,tex} to tools/eval/results/
+```
 
 Re-aggregate without re-playing (useful when you tweak `metrics.py`):
 
@@ -977,7 +986,11 @@ Each row in `results.csv` has ~30 columns. The most useful ones:
 | `structural_avg_sanitizer_fixes` | float | mean fixes the sanitizer applied per bundle |
 | `strings_accuracy` | 0..1 or null | fraction of bundles whose entity refs all resolved |
 | `strings_errors_by_category_npc/item/sheet/hint/other` | int | per-category validator error counts (only on failures) |
-| `adaptation_total_revisions` | int | continuations that fired in this session |
+| `adaptation_attempts` | int | `[Report]` clicks (replan_triggered count) |
+| `adaptation_successful_orchestrations` | int | revisions + completions (the LLM produced a usable response) |
+| `adaptation_revisions` | int | continuations that fired in this session (`decision = continue`) |
+| `adaptation_completions` | int | natural closures (`decision = complete`) |
+| `adaptation_success_ratio` | 0..1 or null | successful / attempts |
 | `adaptation_revisions_per_hour` | float or null | normalized rate |
 | `adaptation_duration_min` | float | session length in minutes |
 | `memory_consistency` | 0..1 or null | verified claims / total claims (null = no claims) |
@@ -999,11 +1012,11 @@ Three concrete uses:
 - **Stuck-detector is heuristic.** When the village geometry traps the scripted player in a rare corner, the session ends with `reason: "stuck"` and contributes null metrics. ~5-10% of sessions hit this in practice.
 - **Memory consistency is biased to vacuous successes.** The metric is `null` when no claims are emitted, which means a model that *never* references past actions scores `null` rather than `0`. That's defensible (you can't be inconsistent if you say nothing) but means the metric only meaningfully measures models that *do* try to remember.
 
-The next four subsections (Threats to Validity, Reproducibility, Related Work, Prompt Appendix, JSON Schema) are written for the paper writeup. They contain everything a reviewer needs to assess validity and a successor needs to replicate.
+The next five subsections (Threats to Validity, Reproducibility, Related Work, Prompt Appendix, JSON Schema) are written for the paper writeup. They contain everything a reviewer needs to assess validity and a successor needs to replicate.
 
 ### Threats to validity
 
-Following the Wohlin et al. taxonomy (internal / external / construct / conclusion), the known risks to the measurement claims are:
+Following the Wohlin et al. taxonomy `[CITE: Wohlin et al., Experimentation in Software Engineering, 2012]` (internal / external / construct / conclusion), the known risks to the measurement claims are:
 
 #### Internal validity
 
@@ -1059,6 +1072,7 @@ Everything needed to re-run the experiment is in the repository.
 | Sanitizer | `scripts/llm/quest_sanitizer.gd` (751 lines) | Pinned by repo commit; `sanitizer_fix_count` payload field counts applied fixes per bundle. |
 | Validator | `scripts/llm/quest_validator.gd` (334 lines) | Pinned by repo commit. |
 | Scripted profiles | `scripts/eval/profile_*.gd` and `scripts/eval/scripted_player.gd` | Each profile is fully deterministic *modulo* RNG-derived sidesteps in the stuck-detector. |
+| Per-session timing caps | `scripts/eval/scripted_player.gd` `MAX_WALL_CLOCK_MS = 90s`, `STUCK_TIMEOUT_MS = 20s`, `MAX_CHAPTERS = 4` | Tuned for batch throughput at the cost of multi-chapter sessions; relax (e.g. `5 * 60 * 1000`) for human play. |
 | Session driver | `scripts/eval_session.gd` | Reads `AGQ_PROFILE` env to pick the profile; otherwise no per-run config. |
 | Eval entrypoint | `tools/eval/run_all.sh` (and `.ps1` mirror) | Single command; `N=15` per profile by default. |
 | Metric implementation | `tools/eval/metrics.py` | Pure Python, no I/O — testable in isolation. |

@@ -15,9 +15,9 @@ extends Node
 #      eval_session.gd quits.
 
 const TICK_INTERVAL := 0.4
-const MAX_WALL_CLOCK_MS := 5 * 60 * 1000     # 5 min hard cap per session
+const MAX_WALL_CLOCK_MS := 90 * 1000          # 90s hard cap per session for batch eval
 const MAX_CHAPTERS := 4                       # walk to giver this many times max
-const STUCK_TIMEOUT_MS := 30 * 1000           # if no progress in 30s, end session
+const STUCK_TIMEOUT_MS := 20 * 1000           # if no progress in 20s, end session
 
 var player: Node = null
 var level_root: Node = null

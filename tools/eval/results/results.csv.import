@@ -1,0 +1,19 @@
+[remap]
+
+importer="csv_translation"
+type="Translation"
+uid="uid://bam0foqls6hf5"
+
+[deps]
+
+files=["res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.events.translation", "res://tools/eval/results/results.latency.translation", "res://tools/eval/results/results.latency.translation", "res://tools/eval/results/results.latency.translation", "res://tools/eval/results/results.latency.translation", "res://tools/eval/results/results.latency.translation", "res://tools/eval/results/results.memory.translation", "res://tools/eval/results/results.memory.translation", "res://tools/eval/results/results.memory.translation", "res://tools/eval/results/results.memory.translation", "res://tools/eval/results/results.session.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.structural.translation", "res://tools/eval/results/results.structural.translation", "res://tools/eval/results/results.structural.translation", "res://tools/eval/results/results.structural.translation", "res://tools/eval/results/results.structural.translation"]
+
+source_file="res://tools/eval/results/results.csv"
+dest_files=["res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.adaptation.translation", "res://tools/eval/results/results.events.translation", "res://tools/eval/results/results.latency.translation", "res://tools/eval/results/results.latency.translation", "res://tools/eval/results/results.latency.translation", "res://tools/eval/results/results.latency.translation", "res://tools/eval/results/results.latency.translation", "res://tools/eval/results/results.memory.translation", "res://tools/eval/results/results.memory.translation", "res://tools/eval/results/results.memory.translation", "res://tools/eval/results/results.memory.translation", "res://tools/eval/results/results.session.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.strings.translation", "res://tools/eval/results/results.structural.translation", "res://tools/eval/results/results.structural.translation", "res://tools/eval/results/results.structural.translation", "res://tools/eval/results/results.structural.translation", "res://tools/eval/results/results.structural.translation"]
+
+[params]
+
+compress=1
+delimiter=0
+unescape_keys=false
+unescape_translations=true

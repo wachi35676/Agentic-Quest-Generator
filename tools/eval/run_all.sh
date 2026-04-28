@@ -56,4 +56,4 @@ python tools/eval/runner.py \
     --entities tools/eval/entities.json
 
 echo
-echo "Done. See tools/eval/results/{results.json, results.csv, summary.json}"
+echo "Done. See tools/eval/results/{results.json, results.csv, summary.json, summary_per_profile.json, headline.json}"

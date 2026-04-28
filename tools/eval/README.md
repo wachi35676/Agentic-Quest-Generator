@@ -18,9 +18,22 @@ Outputs land in `tools/eval/results/`:
 
 - `results.json` — per-session metrics (one record per session)
 - `results.csv` — same data, flat columns, for spreadsheet/paper plots
-- `summary.json` — means across all sessions
+- `summary.json` — flat means across all sessions
+- `summary_per_profile.json` — same statistics broken down by profile (aggressive / cautious / explorer / completionist)
+- `headline.json` — paper-grade headline numbers for each metric: mean, stdev, median, and 95% bootstrap CI ($B = 1000$, seed 42)
 
 Raw event streams are kept in `tools/eval/sessions/*.jsonl` for re-aggregation later.
+
+## Per-session timing caps
+
+`scripts/eval/scripted_player.gd` constants:
+
+| Constant | Default | Effect |
+|---|---|---|
+| `TICK_INTERVAL` | 0.4 s | How often the profile state machine runs `_choose_action()`. |
+| `MAX_WALL_CLOCK_MS` | 90 000 ms | Hard wall-clock cap per session. Tuned for batch throughput; relax to `300 000` for human play. |
+| `STUCK_TIMEOUT_MS` | 20 000 ms | If no progress (move / interact / kill) in this window, end the session. |
+| `MAX_CHAPTERS` | 4 | Stop after this many orchestrator chapters spawned. |
 
 ## How it works
 
@@ -82,9 +95,9 @@ A session ends when:
 
 - A scripted profile reaches its goal and emits `session_end` (most common)
 - `MAX_CHAPTERS = 4` orchestrations have completed
-- 30s of no progress (stuck detector)
-- Hard 5-min wall-clock cap inside `ScriptedPlayer`
-- Hard 6-min outer cap inside `EvalSession` (defensive)
+- `STUCK_TIMEOUT_MS = 20s` of no progress (stuck detector)
+- Hard `MAX_WALL_CLOCK_MS = 90s` wall-clock cap inside `ScriptedPlayer` (batch-tuned; relax for human play)
+- Hard outer cap inside `EvalSession` (defensive)
 
 ## Adding a new profile
 
