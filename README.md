@@ -625,97 +625,132 @@ The deliverables come from a paper-style framing where the question is *"is this
 
 ### Methodology and formal definitions
 
-This subsection defines the measurement model rigorously so the metrics can be cited or replicated unambiguously.
+This subsection defines the measurement model rigorously so the metrics can be cited or replicated unambiguously. Math is rendered in MathJax; event-type names and payload field names appear as `inline code` *outside* math so the math compiles cleanly on GitHub.
 
-**Event-stream model.** A *session* is a finite, totally-ordered sequence of events $E = (e_1, e_2, \ldots, e_n)$ produced by one headless run of the game. Each event $e_i = (\textit{sid}, t_i, \tau_i, \alpha_i, \pi_i)$ is a 5-tuple of session id, monotonic timestamp (in ms, from `Time.get_ticks_msec()`), event type $\tau_i \in \mathcal{T}$, emitter agent $\alpha_i$, and payload dict $\pi_i$. The set $\mathcal{T}$ is fixed (10 types — see *The event stream* below). Events are appended to disk one JSON object per line; ordering is preserved.
+**Event-stream model.** A *session* is a finite, totally-ordered sequence of events
+
+$$E = (e_1, e_2, \ldots, e_n)$$
+
+produced by one headless run of the game. Each event is a 5-tuple
+
+$$e_i = (\mathit{sid}, \, t_i, \, \tau_i, \, \alpha_i, \, \pi_i)$$
+
+of session id, monotonic timestamp $t_i$ (in ms, from `Time.get_ticks_msec()`), event type $\tau_i$, emitter agent $\alpha_i$, and payload dict $\pi_i$. The set of legal types $\mathcal{T}$ is fixed at 10 (see *The event stream* below). Events are appended to disk one JSON object per line; ordering is preserved.
 
 **Closed entity catalog.** The world's authoritative entity sets are
-$$C = (N_{\text{npc}}, N_{\text{item}}, N_{\text{sheet}}, N_{\text{hint}}, N_{\text{obj}}, N_{\text{act}}, N_{\text{pred}})$$
-with $N_{\text{item}}$ from `ItemDB.all_ids()`, $N_{\text{sheet}}$ the directory listing of `assets/characters/`, and so on. $C$ is dumped to `entities.json` at session start so the offline evaluator computes against the *exact* catalog the in-game validator used.
 
-**Filter notation.** $E_\tau = \{e \in E : e.\tau = \tau\}$ is the projection of $E$ to events of type $\tau$. Every metric is a function $f: 2^E \times C \to \mathbb{R} \cup \{\bot\}$ where $\bot$ denotes a vacuous (no data) outcome — distinct from $0$, which represents observed failure.
+$$C = (N_\text{npc}, \; N_\text{item}, \; N_\text{sheet}, \; N_\text{hint}, \; N_\text{obj}, \; N_\text{act}, \; N_\text{pred})$$
+
+where $N_\text{item}$ comes from `ItemDB.all_ids()`, $N_\text{sheet}$ from the directory listing of `assets/characters/`, and so on. $C$ is dumped to `entities.json` at session start so the offline evaluator computes against the *exact* catalog the in-game validator used.
+
+**Filter notation.** For a type $\tau$, the projection
+
+$$E_\tau = \{ e \in E : e.\tau = \tau \}$$
+
+is the subset of events of that type. We write $E_\text{quest}$, $E_\text{trig}$, $E_\text{rev}$, etc. as shorthand for the projections to event types `quest_generated`, `replan_triggered`, `quest_revised`, etc. — the symbolic name appears in math, the literal event-type string appears as `inline code` outside math. Every metric is a function
+
+$$f : 2^E \times C \to \mathbb{R} \cup \{\bot\}$$
+
+where $\bot$ denotes a vacuous (no data) outcome — distinct from $0$, which represents observed failure.
 
 #### M1. Structural Adherence
 
-Let $Q = E_{\texttt{quest\_generated}}$. Define indicator predicates
-$\text{parsed}(q) \equiv q.\pi.\texttt{parsed\_ok}$ and
-$\text{valid}(q) \equiv q.\pi.\texttt{schema\_valid}$.
+Let $Q = E_\text{quest}$ (the events with type `quest_generated`). For an event $q \in Q$ define the indicator predicates
 
-$$
-\text{parse\_rate}(Q) = \begin{cases} \dfrac{1}{\lvert Q \rvert} \sum_{q \in Q} \mathbb{1}[\text{parsed}(q)] & \lvert Q \rvert > 0 \\ \bot & \text{otherwise} \end{cases}
-$$
+$$\text{parsed}(q) \;=\; q.\pi[\text{parsed\_ok}], \qquad \text{valid}(q) \;=\; q.\pi[\text{schema\_valid}]$$
 
-$$
-\text{schema\_pass\_rate}(Q) = \begin{cases} \dfrac{1}{\lvert Q \rvert} \sum_{q \in Q} \mathbb{1}[\text{valid}(q)] & \lvert Q \rvert > 0 \\ \bot & \text{otherwise} \end{cases}
-$$
+both Boolean-valued (treated as 0/1). Then:
 
-$$
-\text{avg\_attempts}(Q) = \frac{1}{\lvert Q \rvert} \sum_{q \in Q} q.\pi.\texttt{attempt}
-\qquad
-\text{avg\_sanitizer\_fixes}(Q) = \frac{1}{\lvert Q \rvert} \sum_{q \in Q} q.\pi.\texttt{sanitizer\_fix\_count}
-$$
+$$\text{parse-rate}(Q) \;=\; \frac{1}{|Q|} \sum_{q \in Q} \text{parsed}(q) \quad \text{when } |Q| > 0, \;\bot \text{ otherwise.}$$
 
-Note $\text{valid}(q) \Rightarrow \text{parsed}(q)$ by construction; therefore $\text{schema\_pass\_rate} \le \text{parse\_rate}$.
+$$\text{schema-pass-rate}(Q) \;=\; \frac{1}{|Q|} \sum_{q \in Q} \text{valid}(q) \quad \text{when } |Q| > 0, \;\bot \text{ otherwise.}$$
+
+$$\text{avg-attempts}(Q) \;=\; \frac{1}{|Q|} \sum_{q \in Q} q.\pi[\text{attempt}]$$
+
+$$\text{avg-sanitizer-fixes}(Q) \;=\; \frac{1}{|Q|} \sum_{q \in Q} q.\pi[\text{sanitizer\_fix\_count}]$$
+
+By construction $\text{valid}(q) \Rightarrow \text{parsed}(q)$, so $\text{schema-pass-rate} \le \text{parse-rate}$.
+
+> **Note on transport failures.** Events with payload field `transport_failed: true` (LLM 429s — the network call never produced a response) are excluded from $Q$ in `tools/eval/metrics.py::structural_adherence`. They are reported separately as `n_transport_failed`.
 
 #### M2. Accuracy of Given Strings
 
-Let $U_C = N_{\text{npc}} \cup N_{\text{item}} \cup N_{\text{sheet}} \cup N_{\text{hint}}$ be the union of catalog reference sets, and let $\rho(b) \subseteq U_C^{*}$ denote the multiset of entity references appearing in a bundle $b$. The validator implements the predicate
-$$\text{string\_valid}(b) \equiv \rho(b) \subseteq U_C \;\land\; (\text{schema rules})$$
-so a `schema_valid: true` bundle satisfies $\rho(b) \subseteq U_C$ by construction. The metric reduces to
-$$\text{string\_accuracy}(Q) = \text{schema\_pass\_rate}(Q).$$
+Let
 
-For *failed* bundles ($\text{valid}(q) = 0$), errors $\varepsilon \in q.\pi.\texttt{validation\_errors}$ are partitioned into categories $\kappa \in \{\text{npc}, \text{item}, \text{sheet}, \text{hint}, \text{other}\}$ by regex match (see `_categorise()` in `tools/eval/metrics.py`). Per-category error count:
+$$U_C \;=\; N_\text{npc} \,\cup\, N_\text{item} \,\cup\, N_\text{sheet} \,\cup\, N_\text{hint}$$
 
-$$K_\kappa = \sum_{q \in Q : \neg \text{valid}(q)} \;\; \sum_{\varepsilon \in q.\pi.\texttt{validation\_errors}} \mathbb{1}[\text{cat}(\varepsilon) = \kappa]$$
+be the union of catalog reference sets, and let $\rho(b)$ denote the multiset of entity references appearing in a bundle $b$. The validator implements the predicate
+
+$$\text{string-valid}(b) \;\equiv\; \rho(b) \subseteq U_C \;\land\; \text{(other schema rules)}.$$
+
+So a bundle with `schema_valid: true` already satisfies $\rho(b) \subseteq U_C$. The metric therefore reduces to
+
+$$\text{string-accuracy}(Q) \;=\; \text{schema-pass-rate}(Q).$$
+
+For *failed* bundles, errors $\varepsilon$ in payload field `validation_errors` are partitioned into categories $\kappa \in \{\text{npc}, \text{item}, \text{sheet}, \text{hint}, \text{other}\}$ by regex match (see `_categorise()` in `tools/eval/metrics.py`). The per-category error count is
+
+$$K_\kappa \;=\; \sum_{q \,\in\, Q,\; \neg\text{valid}(q)} \;\; \sum_{\varepsilon \,\in\, q.\pi[\text{validation\_errors}]} \mathbb{1}[\text{cat}(\varepsilon) = \kappa].$$
 
 #### M3. Adaptation Rate
 
-$$T = E_{\texttt{replan\_triggered}}, \quad R = E_{\texttt{quest\_revised}}, \quad C_o = E_{\texttt{orchestration\_complete}}$$
+Define three event subsets:
+
+- $T = E_\text{trig}$ — events with type `replan_triggered`
+- $R = E_\text{rev}$ — events with type `quest_revised`
+- $C_o = E_\text{comp}$ — events with type `orchestration_complete`
 
 | Symbol | Meaning |
 |---|---|
-| $\lvert T \rvert$ | **attempts** — `[Report]` clicks that initiated an orchestration call |
-| $\lvert R \rvert$ | **revisions** — orchestrations that returned `decision = continue` and passed all guardrails |
-| $\lvert C_o \rvert$ | **completions** — orchestrations that returned `decision = complete` |
-| $\lvert R \rvert + \lvert C_o \rvert$ | **successful orchestrations** — produced a usable response |
+| $|T|$ | **attempts** — `[Report]` clicks that initiated an orchestration call |
+| $|R|$ | **revisions** — orchestrations that returned `decision = continue` and passed all guardrails |
+| $|C_o|$ | **completions** — orchestrations that returned `decision = complete` |
+| $|R| + |C_o|$ | **successful orchestrations** — produced a usable response |
 
-$$\text{success\_ratio} = \begin{cases} \dfrac{\lvert R \rvert + \lvert C_o \rvert}{\lvert T \rvert} & \lvert T \rvert > 0 \\ \bot & \text{otherwise} \end{cases}$$
+The success ratio is
+
+$$\text{success-ratio} \;=\; \frac{|R| + |C_o|}{|T|} \quad \text{when } |T| > 0, \;\bot \text{ otherwise.}$$
 
 Session duration $D = t_n - t_1$ (ms). Throughput rates:
-$$\text{revisions\_per\_hour} = \frac{\lvert R \rvert}{D / 3.6 \times 10^6}, \qquad \text{attempts\_per\_hour} = \frac{\lvert T \rvert}{D / 3.6 \times 10^6}.$$
 
-Distinguishing *attempts* from *revisions* is critical: the engine's empty-NPC guardrail (Section *Hard guardrails*) can cause $\lvert T \rvert > \lvert R \rvert + \lvert C_o \rvert$ when the LLM emits malformed continuations. Reporting only $\lvert R \rvert$ would misattribute an LLM quality issue as a system non-adaptiveness issue.
+$$\text{revisions-per-hour} \;=\; \frac{|R|}{D / 3{,}600{,}000}, \qquad \text{attempts-per-hour} \;=\; \frac{|T|}{D / 3{,}600{,}000}.$$
+
+Distinguishing *attempts* from *revisions* is critical: the engine's empty-NPC guardrail (see *Hard guardrails*) can cause $|T| > |R| + |C_o|$ when the LLM emits malformed continuations. Reporting only $|R|$ would misattribute an LLM quality issue as a system non-adaptiveness issue.
 
 #### M4. Memory Consistency
 
-Let $L$ be the action ledger at any point during the session — a sequence of tuples $\ell = (\text{kind}, p, \text{frame})$ with $p$ a free-form parameter dict. Let $M = E_{\texttt{memory\_claim}}$. Each $m \in M$ carries a claim $m.\pi.\texttt{claim} = (k, q)$ where $q$ is a parameter dict.
+Let $L$ be the action ledger at any point during the session — a sequence of tuples $\ell = (\text{kind}, \, p, \, \text{frame})$ where $p$ is a free-form parameter dict. Let $M = E_\text{mem}$ (events with type `memory_claim`). Each $m \in M$ carries a claim of the form $(k, q)$ where $q$ is itself a parameter dict.
 
 The verification predicate is **subset-match against any historical ledger entry**:
-$$\text{verified}(m, L) \equiv \exists \ell \in L : \ell.\text{kind} = k \;\land\; q \subseteq \ell.p$$
+
+$$\text{verified}(m, L) \;\equiv\; \exists\, \ell \in L \;:\; \ell.\text{kind} = k \;\land\; q \subseteq \ell.p$$
 
 where $q \subseteq \ell.p$ is dict-subset: every key in $q$ appears in $\ell.p$ with equal value. This permits the LLM to omit incidental fields like `frame` while still verifying.
 
-$$\text{memory\_consistency} = \begin{cases} \dfrac{\lvert \{m \in M : \text{verified}(m, L)\} \rvert}{\lvert M \rvert} & \lvert M \rvert > 0 \\ \bot & \text{otherwise (vacuous)} \end{cases}$$
+$$\text{memory-consistency} \;=\; \frac{|\{ m \in M : \text{verified}(m, L) \}|}{|M|} \quad \text{when } |M| > 0, \;\bot \text{ otherwise (vacuous).}$$
 
-The verification is performed **at orchestration time** and stored on the event itself ($m.\pi.\texttt{verified}$), so the offline evaluator just counts. This avoids re-implementing ledger semantics in the Python harness.
+Verification is performed **at orchestration time** and stored on the event itself (payload field `verified`), so the offline evaluator just counts. This avoids re-implementing ledger semantics in the Python harness.
 
 The vacuous case ($\bot$ when no claims are emitted) is a **deliberate choice** with a known bias — see *Threats to Validity*.
 
 #### M5. Replanning Latency
 
-Triggers and completions are paired by `prev_quest_id`. Define the matching function $\mu$ that, for each trigger event $e_t \in E_{\texttt{replan\_triggered}}$, returns the *earliest* completion event with the same `prev_quest_id` whose timestamp is strictly later, or $\bot$ if none exists:
+Triggers and completions are paired by their `prev_quest_id` payload field. Let $T = E_\text{trig}$ (type `replan_triggered`) and $C_r = E_\text{rcomp}$ (type `replan_completed`). Define the matching function $\mu$ that, for each trigger $e_t \in T$, returns the *earliest* completion event with the same `prev_quest_id` and a strictly later timestamp:
 
-$$\mu(e_t) = \arg\min_{e_c} \bigl\{ t_c \;\bigm|\; e_c \in E_{\texttt{replan\_completed}},\; e_c.\pi.\texttt{prev\_quest\_id} = e_t.\pi.\texttt{prev\_quest\_id},\; t_c > t_t \bigr\}.$$
+$$\mu(e_t) \;=\; \arg\min_{e_c \in C_r} \, t_c$$
 
-For each matched pair, the latency is $\Delta_i = t_{\mu(e_t)} - t_{e_t}$. Report median, $p_{95}$, max, and mean of $\{\Delta_i\}$:
+subject to $e_c.\pi[\text{prev\_quest\_id}] = e_t.\pi[\text{prev\_quest\_id}]$ and $t_c > t_t$. If no such $e_c$ exists, $\mu(e_t) = \bot$.
 
-$$\text{median}(\{\Delta_i\}), \quad p_{95}(\{\Delta_i\}), \quad \max(\{\Delta_i\}), \quad \text{mean}(\{\Delta_i\}).$$
+For each matched pair, the latency is
 
-Long-tailed distribution → median + p95 are primary; mean is reported for completeness. Unmatched triggers (sessions that crashed mid-orchestration) are excluded from latency stats but retained in $\lvert T \rvert$ for the success ratio in M3.
+$$\Delta_i \;=\; t_{\mu(e_t)} - t_{e_t}.$$
+
+Report the median, the 95th percentile $p_{95}$, the max, and the mean of $\{\Delta_i\}$. The distribution is long-tailed (LLM stragglers and Gemini fallback under throttling), so median + $p_{95}$ are primary; mean is reported for completeness.
+
+> **Note on filtering.** The implementation in `tools/eval/metrics.py::replanning_latency` uses a per-`prev_quest_id` FIFO queue (matching the *next* completion for each trigger, not the latest), and splits successful (`ok=True`) replans from failed ones. Headline latency is reported over successful replans only — a fast HTTP 429 fail at <1s would otherwise skew the median. Unmatched triggers (sessions that crashed mid-orchestration) are excluded from latency stats but retained in $|T|$ for the success ratio in M3.
 
 #### Aggregation across sessions
 
-For per-profile aggregates with $S$ sessions, each metric $f_s$ is computed per-session, then aggregated as either the **mean of session means** (preferred — equal weight per session, robust to session length variance) or **pooled** (concatenate events across sessions, then compute — preserves event-level proportions). The runner emits both: per-session in `results.json`, mean-of-means in `summary.json`. Pooled aggregates are computed on demand from `results.csv`. Confidence intervals (when reported) are 95% nonparametric bootstrap with $B = 1000$ resamples over the session-level statistic.
+For per-profile aggregates over $S$ sessions, each per-session metric $f_s$ is computed per-session and then aggregated as either the **mean of session means** (preferred — equal weight per session, robust to session length variance) or **pooled** (concatenate events across sessions then compute, preserving event-level proportions). The runner emits both: per-session in `results.json`, mean-of-means in `summary.json`. Pooled aggregates can be re-computed on demand from `results.csv`. Confidence intervals (when reported) are 95% nonparametric bootstrap with $B = 1000$ resamples over the session-level statistic.
 
 ### End-to-end pipeline
 
