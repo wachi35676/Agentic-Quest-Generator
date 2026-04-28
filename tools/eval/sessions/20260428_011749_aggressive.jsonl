@@ -1,5 +1,0 @@
-{"agent":"main","event_type":"session_start","payload":{"profile":"aggressive","world_npcs":["Farmer","Hunter","Old Sage","Mystic","Wanderer"]},"session_id":"20260428_011749_aggressive","timestamp_ms":341}
-{"agent":"QuestGenAgent","event_type":"quest_generated","payload":{"attempt":2,"branch_count":4,"elapsed_ms":14469,"model":"llama-3.3-70b-versatile","npc_count":4,"parsed_ok":true,"phase":"branching","quest_id":"the_missing_gem","raw_text_len":11592,"sanitizer_fix_count":11,"schema_valid":true},"session_id":"20260428_011749_aggressive","timestamp_ms":23978}
-{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"victim"}},"session_id":"20260428_011749_aggressive","timestamp_ms":24684}
-{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"thief"}},"session_id":"20260428_011749_aggressive","timestamp_ms":27175}
-{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"betrayer"}},"session_id":"20260428_011749_aggressive","timestamp_ms":29679}

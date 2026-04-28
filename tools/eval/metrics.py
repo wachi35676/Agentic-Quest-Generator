@@ -96,17 +96,26 @@ def string_accuracy(events: list[dict], entities: dict[str, set[str]]) -> dict[s
 # --------------------------------------------------------------------------
 
 def adaptation_rate(events: list[dict]) -> dict[str, Any]:
+    # Distinguish ATTEMPTS (how often the player asked the orchestrator
+    # to adapt) from SUCCESSES (how often a fresh chapter actually
+    # spawned). 0 successes alongside >0 attempts means the system
+    # tried to adapt but the LLM output failed validation — a quality
+    # signal, not a "system doesn't adapt" signal.
+    attempts = [e for e in events if e["event_type"] == "replan_triggered"]
     revisions = [e for e in events if e["event_type"] == "quest_revised"]
-    completions = [
-        e for e in events
-        if e["event_type"] == "orchestration_complete"
-    ]
+    completions = [e for e in events if e["event_type"] == "orchestration_complete"]
+    successful_orchestrations = len(revisions) + len(completions)
     duration_ms = _session_duration_ms(events)
     duration_min = duration_ms / 60_000.0 if duration_ms else 0.0
+    success_ratio = (successful_orchestrations / len(attempts)) if attempts else None
     return {
-        "total_revisions": len(revisions),
+        "attempts": len(attempts),
+        "successful_orchestrations": successful_orchestrations,
+        "revisions": len(revisions),
         "completions": len(completions),
+        "success_ratio": success_ratio,
         "duration_min": duration_min,
+        "attempts_per_hour": (len(attempts) / duration_min * 60.0) if duration_min > 0 else None,
         "revisions_per_hour": (len(revisions) / duration_min * 60.0) if duration_min > 0 else None,
     }
 

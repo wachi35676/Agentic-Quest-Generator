@@ -176,14 +176,34 @@ func _drive_wanderer_dialog() -> void:
 	# Nothing recognised — close.
 	dialog.close_dialog()
 
+var _npc_choices_picked_this_visit: int = 0
+
+# Reset per-visit counter when dialog opens with a different NPC.
+var _last_dialog_title: String = ""
+
 # Subclasses override to pick choices instead of just Bye.
 func _drive_npc_dialog() -> void:
-	# Default: pick the first non-action choice if present, else Bye.
+	# Reset per-visit counter when the dialog title changes (= new NPC).
+	var title := _dialog_title()
+	if title != _last_dialog_title:
+		_last_dialog_title = title
+		_npc_choices_picked_this_visit = 0
+	# Pick at most 2 choices per NPC visit, then close. Cyclic dialog
+	# trees would otherwise loop forever (start -> A -> back-to-start).
+	if _npc_choices_picked_this_visit >= 2:
+		_close_npc_dialog()
+		return
 	var choices := _dialog_choices()
 	if not choices.is_empty():
 		dialog.choice_chosen.emit(choices[0])
+		_npc_choices_picked_this_visit += 1
 		_last_progress_ms = Time.get_ticks_msec()
 		return
+	_close_npc_dialog()
+
+func _close_npc_dialog() -> void:
+	_npc_choices_picked_this_visit = 0
+	_last_dialog_title = ""
 	var labels := _dialog_button_labels()
 	if "Bye" in labels:
 		dialog.action_chosen.emit("Bye")

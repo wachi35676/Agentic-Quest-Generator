@@ -23,12 +23,20 @@ func _choose_action() -> void:
 		player.scripted_interact()
 		_last_progress_ms = Time.get_ticks_msec()
 
+var _choices_picked_this_visit: int = 0
+
 func _drive_npc_dialog() -> void:
-	# Always pick the first available choice (whatever it is), then close
-	# the next time the dialog opens by hitting Bye.
+	# Pick at most ONE choice per dialog visit, then close. Otherwise
+	# dialog trees with cyclic nodes (start -> A -> back-to-start)
+	# become infinite click-loops that flood the ledger.
+	if _choices_picked_this_visit >= 1:
+		dialog.close_dialog()
+		_choices_picked_this_visit = 0
+		return
 	var choices := _dialog_choices()
 	if not choices.is_empty():
 		dialog.choice_chosen.emit(choices[0])
+		_choices_picked_this_visit += 1
 		_last_progress_ms = Time.get_ticks_msec()
 		return
 	var labels := _dialog_button_labels()
@@ -36,3 +44,4 @@ func _drive_npc_dialog() -> void:
 		dialog.action_chosen.emit("Bye")
 	else:
 		dialog.close_dialog()
+	_choices_picked_this_visit = 0

@@ -1,8 +1,6 @@
-adaptation_completions,adaptation_duration_min,adaptation_revisions_per_hour,adaptation_total_revisions,events,latency_max_ms,latency_mean_ms,latency_median_ms,latency_n,latency_p95_ms,memory_consistency,memory_n,session,strings_accuracy,strings_errors_by_category_hint,strings_errors_by_category_item,strings_errors_by_category_npc,strings_errors_by_category_other,strings_errors_by_category_sheet,strings_n,structural_avg_attempts,structural_avg_sanitizer_fixes,structural_n,structural_parse_rate,structural_pass_rate
-0,5.00385,0.0,0,3,,,,0,,,0,20260428_005722_aggressive,,,,,,,0,,,0,,
-0,5.003666666666667,0.0,0,3,,,,0,,,0,20260428_010223_cautious,,,,,,,0,,,0,,
-0,5.003833333333334,0.0,0,3,,,,0,,,0,20260428_010725_explorer,,,,,,,0,,,0,,
-0,5.00365,0.0,0,3,,,,0,,,0,20260428_011226_completionist,,,,,,,0,,,0,,
-0,0.0,,0,1,,,,0,,,0,20260428_011442_aggressive,,,,,,,0,,,0,,
-0,0.9376833333333333,0.0,0,12,22913,10494,4471,3,22913,,0,20260428_011546_aggressive,1.0,0,0,0,0,0,1,1,13,1,1.0,1.0
-0,0.48896666666666666,0.0,0,5,,,,0,,,0,20260428_011749_aggressive,1.0,0,0,0,0,0,1,2,11,1,1.0,1.0
+adaptation_attempts,adaptation_attempts_per_hour,adaptation_completions,adaptation_duration_min,adaptation_revisions,adaptation_revisions_per_hour,adaptation_success_ratio,adaptation_successful_orchestrations,events,latency_max_ms,latency_mean_ms,latency_median_ms,latency_n,latency_p95_ms,memory_consistency,memory_n,memory_total,memory_verified,session,strings_accuracy,strings_errors_by_category_hint,strings_errors_by_category_item,strings_errors_by_category_npc,strings_errors_by_category_other,strings_errors_by_category_sheet,strings_n,structural_avg_attempts,structural_avg_sanitizer_fixes,structural_n,structural_parse_rate,structural_pass_rate
+2,194.1747572815534,1,0.618,1,97.0873786407767,1.0,2,21,3907,2464,2464.0,2,3907,1.0,6,6,6,20260428_094654_aggressive,1.0,0,0,0,0,0,1,1,0,1,1.0,1.0
+0,0.0,0,5.003666666666667,0,0.0,,0,4,,,,0,,,0,,,20260428_095217_explorer,1.0,0,0,0,0,0,1,2,1,1,1.0,1.0
+3,35.9737391704056,0,5.00365,2,23.9824927802704,0.6666666666666666,2,22,4888,4736,4874,3,4888,0.4,5,5,2,20260428_095353_cautious,1.0,0,0,0,0,0,1,1,5,1,1.0,1.0
+3,35.968946809254675,0,5.004316666666667,3,35.968946809254675,1.0,3,50,5313,4426.666666666667,4272,3,5313,0.75,8,8,6,20260428_095718_completionist,1.0,0,0,0,0,0,1,2,8,1,1.0,1.0
+0,0.0,0,0.22521666666666668,0,0.0,,0,2,,,,0,,,0,,,20260428_095855_explorer,1.0,0,0,0,0,0,1,1,6,1,1.0,1.0

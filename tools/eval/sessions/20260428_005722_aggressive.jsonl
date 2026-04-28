@@ -1,3 +1,0 @@
-{"agent":"main","event_type":"session_start","payload":{"profile":"aggressive","world_npcs":["Farmer","Hunter","Old Sage","Mystic","Wanderer"]},"session_id":"20260428_005722_aggressive","timestamp_ms":349}
-{"agent":"ScriptedPlayer","event_type":"session_end","payload":{"duration_ms":300013,"orchestrations_seen":0,"profile":"aggressive","reason":"wall_clock_timeout"},"session_id":"20260428_005722_aggressive","timestamp_ms":300362}
-{"agent":"main","event_type":"session_end","payload":{"duration_ms":300231,"reason":"window_close_or_predelete"},"session_id":"20260428_005722_aggressive","timestamp_ms":300371}
