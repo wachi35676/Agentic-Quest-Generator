@@ -22,6 +22,12 @@ It's built in **Godot 4.6.2** with **GDScript**, and it can talk to **Groq** (pr
 - [Lazy dialog expansion](#lazy-dialog-expansion)
 - [Constraints and guardrails](#constraints-and-guardrails)
 - [Evaluation](#evaluation)
+  - [Methodology and formal definitions](#methodology-and-formal-definitions)
+  - [Threats to validity](#threats-to-validity)
+  - [Reproducibility](#reproducibility)
+  - [Related work](#related-work)
+  - [Prompt appendix](#prompt-appendix)
+  - [JSON Schema specification](#json-schema-specification)
 - [Running the project](#running-the-project)
 - [Project layout](#project-layout)
 
@@ -617,6 +623,100 @@ The deliverables come from a paper-style framing where the question is *"is this
 4. **Memory Consistency** — *Claim: when the Wanderer references the player's past, the references are real.* Cross-checks the LLM's `memory_claims` against the action ledger. If it's <1.0, the model is hallucinating events that didn't happen.
 5. **Replanning Latency** — *Claim: continuations are fast enough to feel responsive.* Wall-clock ms from `[Report]` click to a usable new chapter spawning. Long tails reveal where the repair loop is hurting.
 
+### Methodology and formal definitions
+
+This subsection defines the measurement model rigorously so the metrics can be cited or replicated unambiguously.
+
+**Event-stream model.** A *session* is a finite, totally-ordered sequence of events $E = (e_1, e_2, \ldots, e_n)$ produced by one headless run of the game. Each event $e_i = (\textit{sid}, t_i, \tau_i, \alpha_i, \pi_i)$ is a 5-tuple of session id, monotonic timestamp (in ms, from `Time.get_ticks_msec()`), event type $\tau_i \in \mathcal{T}$, emitter agent $\alpha_i$, and payload dict $\pi_i$. The set $\mathcal{T}$ is fixed (10 types — see *The event stream* below). Events are appended to disk one JSON object per line; ordering is preserved.
+
+**Closed entity catalog.** The world's authoritative entity sets are
+$$C = (N_{\text{npc}}, N_{\text{item}}, N_{\text{sheet}}, N_{\text{hint}}, N_{\text{obj}}, N_{\text{act}}, N_{\text{pred}})$$
+with $N_{\text{item}}$ from `ItemDB.all_ids()`, $N_{\text{sheet}}$ the directory listing of `assets/characters/`, and so on. $C$ is dumped to `entities.json` at session start so the offline evaluator computes against the *exact* catalog the in-game validator used.
+
+**Filter notation.** $E_\tau = \{e \in E : e.\tau = \tau\}$ is the projection of $E$ to events of type $\tau$. Every metric is a function $f: 2^E \times C \to \mathbb{R} \cup \{\bot\}$ where $\bot$ denotes a vacuous (no data) outcome — distinct from $0$, which represents observed failure.
+
+#### M1. Structural Adherence
+
+Let $Q = E_{\texttt{quest\_generated}}$. Define indicator predicates
+$\text{parsed}(q) \equiv q.\pi.\texttt{parsed\_ok}$ and
+$\text{valid}(q) \equiv q.\pi.\texttt{schema\_valid}$.
+
+$$
+\text{parse\_rate}(Q) = \begin{cases} \dfrac{1}{\lvert Q \rvert} \sum_{q \in Q} \mathbb{1}[\text{parsed}(q)] & \lvert Q \rvert > 0 \\ \bot & \text{otherwise} \end{cases}
+$$
+
+$$
+\text{schema\_pass\_rate}(Q) = \begin{cases} \dfrac{1}{\lvert Q \rvert} \sum_{q \in Q} \mathbb{1}[\text{valid}(q)] & \lvert Q \rvert > 0 \\ \bot & \text{otherwise} \end{cases}
+$$
+
+$$
+\text{avg\_attempts}(Q) = \frac{1}{\lvert Q \rvert} \sum_{q \in Q} q.\pi.\texttt{attempt}
+\qquad
+\text{avg\_sanitizer\_fixes}(Q) = \frac{1}{\lvert Q \rvert} \sum_{q \in Q} q.\pi.\texttt{sanitizer\_fix\_count}
+$$
+
+Note $\text{valid}(q) \Rightarrow \text{parsed}(q)$ by construction; therefore $\text{schema\_pass\_rate} \le \text{parse\_rate}$.
+
+#### M2. Accuracy of Given Strings
+
+Let $U_C = N_{\text{npc}} \cup N_{\text{item}} \cup N_{\text{sheet}} \cup N_{\text{hint}}$ be the union of catalog reference sets, and let $\rho(b) \subseteq U_C^{*}$ denote the multiset of entity references appearing in a bundle $b$. The validator implements the predicate
+$$\text{string\_valid}(b) \equiv \rho(b) \subseteq U_C \;\land\; (\text{schema rules})$$
+so a `schema_valid: true` bundle satisfies $\rho(b) \subseteq U_C$ by construction. The metric reduces to
+$$\text{string\_accuracy}(Q) = \text{schema\_pass\_rate}(Q).$$
+
+For *failed* bundles ($\text{valid}(q) = 0$), errors $\varepsilon \in q.\pi.\texttt{validation\_errors}$ are partitioned into categories $\kappa \in \{\text{npc}, \text{item}, \text{sheet}, \text{hint}, \text{other}\}$ by regex match (see `_categorise()` in `tools/eval/metrics.py`). Per-category error count:
+
+$$K_\kappa = \sum_{q \in Q : \neg \text{valid}(q)} \;\; \sum_{\varepsilon \in q.\pi.\texttt{validation\_errors}} \mathbb{1}[\text{cat}(\varepsilon) = \kappa]$$
+
+#### M3. Adaptation Rate
+
+$$T = E_{\texttt{replan\_triggered}}, \quad R = E_{\texttt{quest\_revised}}, \quad C_o = E_{\texttt{orchestration\_complete}}$$
+
+| Symbol | Meaning |
+|---|---|
+| $\lvert T \rvert$ | **attempts** — `[Report]` clicks that initiated an orchestration call |
+| $\lvert R \rvert$ | **revisions** — orchestrations that returned `decision = continue` and passed all guardrails |
+| $\lvert C_o \rvert$ | **completions** — orchestrations that returned `decision = complete` |
+| $\lvert R \rvert + \lvert C_o \rvert$ | **successful orchestrations** — produced a usable response |
+
+$$\text{success\_ratio} = \begin{cases} \dfrac{\lvert R \rvert + \lvert C_o \rvert}{\lvert T \rvert} & \lvert T \rvert > 0 \\ \bot & \text{otherwise} \end{cases}$$
+
+Session duration $D = t_n - t_1$ (ms). Throughput rates:
+$$\text{revisions\_per\_hour} = \frac{\lvert R \rvert}{D / 3.6 \times 10^6}, \qquad \text{attempts\_per\_hour} = \frac{\lvert T \rvert}{D / 3.6 \times 10^6}.$$
+
+Distinguishing *attempts* from *revisions* is critical: the engine's empty-NPC guardrail (Section *Hard guardrails*) can cause $\lvert T \rvert > \lvert R \rvert + \lvert C_o \rvert$ when the LLM emits malformed continuations. Reporting only $\lvert R \rvert$ would misattribute an LLM quality issue as a system non-adaptiveness issue.
+
+#### M4. Memory Consistency
+
+Let $L$ be the action ledger at any point during the session — a sequence of tuples $\ell = (\text{kind}, p, \text{frame})$ with $p$ a free-form parameter dict. Let $M = E_{\texttt{memory\_claim}}$. Each $m \in M$ carries a claim $m.\pi.\texttt{claim} = (k, q)$ where $q$ is a parameter dict.
+
+The verification predicate is **subset-match against any historical ledger entry**:
+$$\text{verified}(m, L) \equiv \exists \ell \in L : \ell.\text{kind} = k \;\land\; q \subseteq \ell.p$$
+
+where $q \subseteq \ell.p$ is dict-subset: every key in $q$ appears in $\ell.p$ with equal value. This permits the LLM to omit incidental fields like `frame` while still verifying.
+
+$$\text{memory\_consistency} = \begin{cases} \dfrac{\lvert \{m \in M : \text{verified}(m, L)\} \rvert}{\lvert M \rvert} & \lvert M \rvert > 0 \\ \bot & \text{otherwise (vacuous)} \end{cases}$$
+
+The verification is performed **at orchestration time** and stored on the event itself ($m.\pi.\texttt{verified}$), so the offline evaluator just counts. This avoids re-implementing ledger semantics in the Python harness.
+
+The vacuous case ($\bot$ when no claims are emitted) is a **deliberate choice** with a known bias — see *Threats to Validity*.
+
+#### M5. Replanning Latency
+
+Triggers and completions are paired by `prev_quest_id`. Define the matching function $\mu$ that, for each trigger event $e_t \in E_{\texttt{replan\_triggered}}$, returns the *earliest* completion event with the same `prev_quest_id` whose timestamp is strictly later, or $\bot$ if none exists:
+
+$$\mu(e_t) = \arg\min_{e_c} \bigl\{ t_c \;\bigm|\; e_c \in E_{\texttt{replan\_completed}},\; e_c.\pi.\texttt{prev\_quest\_id} = e_t.\pi.\texttt{prev\_quest\_id},\; t_c > t_t \bigr\}.$$
+
+For each matched pair, the latency is $\Delta_i = t_{\mu(e_t)} - t_{e_t}$. Report median, $p_{95}$, max, and mean of $\{\Delta_i\}$:
+
+$$\text{median}(\{\Delta_i\}), \quad p_{95}(\{\Delta_i\}), \quad \max(\{\Delta_i\}), \quad \text{mean}(\{\Delta_i\}).$$
+
+Long-tailed distribution → median + p95 are primary; mean is reported for completeness. Unmatched triggers (sessions that crashed mid-orchestration) are excluded from latency stats but retained in $\lvert T \rvert$ for the success ratio in M3.
+
+#### Aggregation across sessions
+
+For per-profile aggregates with $S$ sessions, each metric $f_s$ is computed per-session, then aggregated as either the **mean of session means** (preferred — equal weight per session, robust to session length variance) or **pooled** (concatenate events across sessions, then compute — preserves event-level proportions). The runner emits both: per-session in `results.json`, mean-of-means in `summary.json`. Pooled aggregates are computed on demand from `results.csv`. Confidence intervals (when reported) are 95% nonparametric bootstrap with $B = 1000$ resamples over the session-level statistic.
+
 ### End-to-end pipeline
 
 ```mermaid
@@ -898,6 +998,468 @@ Three concrete uses:
 - **No statistical significance work.** The runner reports per-session means; significance testing (paired bootstrap, etc.) belongs in the paper writeup.
 - **Stuck-detector is heuristic.** When the village geometry traps the scripted player in a rare corner, the session ends with `reason: "stuck"` and contributes null metrics. ~5-10% of sessions hit this in practice.
 - **Memory consistency is biased to vacuous successes.** The metric is `null` when no claims are emitted, which means a model that *never* references past actions scores `null` rather than `0`. That's defensible (you can't be inconsistent if you say nothing) but means the metric only meaningfully measures models that *do* try to remember.
+
+The next four subsections (Threats to Validity, Reproducibility, Related Work, Prompt Appendix, JSON Schema) are written for the paper writeup. They contain everything a reviewer needs to assess validity and a successor needs to replicate.
+
+### Threats to validity
+
+Following the Wohlin et al. taxonomy (internal / external / construct / conclusion), the known risks to the measurement claims are:
+
+#### Internal validity
+
+| Threat | Where it bites | Mitigation |
+|---|---|---|
+| **Subset-match permissiveness for memory claims.** A claim with one parameter (`{npc_name: "Silas"}`) verifies against any ledger entry with that NPC name, even if the *kind* of action was different. | M4 over-counts when claims happen to coincidentally overlap. | The implementation also requires `kind` equality (line 27 of `metrics.py` would fail without it), so this is bounded — but a paper-grade run should report a stricter "exact-match" variant alongside subset. |
+| **Vacuous-success bias in M4.** A model that emits zero claims scores $\bot$, not $0$, which means a strategy of "just don't try to remember" is not penalized by the metric. | M4 numbers favour terse models. | Report `n_claims` alongside `consistency`; we already do. A model that scores 1.00 with one claim is not equivalent to one that scores 0.95 with twenty claims. |
+| **Ledger truncation.** Capped at 20 entries; older entries fall off. A claim verifying against an evicted entry would falsely fail. | M4 lower-bounded by truncation rate. | Sessions stay well under 20 in practice (max observed: 14). Caveat applies to longer hypothetical sessions. |
+| **Entity catalog drift.** `entities.json` is dumped per session. If the catalog changes between session and offline aggregation, M2 categorisation could shift. | M2 per-category counts. | Catalog snapshot is part of the artifact bundle; never re-derived offline. |
+| **Profile-driver bias.** The four scripted profiles might exercise the system in ways that systematically over- or under-trigger certain failure modes (e.g., explorer's give→talk→kill cycle stress-tests dialog more than aggressive's pure-kill loop). | All five metrics. | Per-profile breakdowns are reported; aggregates are mean-of-profile-means rather than naive pooling. |
+| **Stuck-detector false positives.** A session that ends with `reason: "stuck"` is dropped from latency but kept for structural metrics. Tilted toward harder cases. | M5 underestimates worst-case latency. | Surface `reason` in `summary.json`; report stuck-rate explicitly. |
+
+#### External validity
+
+| Threat | Where it bites | Mitigation |
+|---|---|---|
+| **Single primary model** (`llama-3.3-70b-versatile`). Findings may not generalize to GPT-4o, Claude, smaller open-weights, etc. | All claims about LLM behaviour. | Provider is abstracted behind `CompositeClient`; switching is a one-line change in `quest_gen_agent.gd`. |
+| **Single game world.** The closed catalog has 14 character sheets, ~30 items, 10 position hints. A larger or differently-structured world might shift sanitizer fix counts. | M1 sanitizer-fix metric. | Documented; ablation TODO. |
+| **No human players.** Scripted profiles are rule-based; their action distribution differs from real players (e.g., real players idle, get lost, repeat). | Generalization to real player experience. | Scripted profiles are by-design coverage tools, not user simulators. A user study is the appropriate next instrument. |
+| **Provider-side throttling shapes the experiment.** Groq's free-tier TPM cap forces the pipeline to fall back to Gemini under load, which has different latency and stylistic behaviour. | M5; M1 (different model = different fix count). | `provider` field is logged per `quest_generated` event; aggregations can stratify. |
+
+#### Construct validity
+
+| Threat | Where it bites |
+|---|---|
+| **Schema-validity ≠ "correctness".** A bundle that passes the schema can still be narratively bad (boring, contradictory, repetitive). M1 measures only mechanical correctness. | A "high schema-pass rate, low player satisfaction" outcome is possible and unmeasured. |
+| **String accuracy is partially circular.** M2 leans on the validator's own checks; if a category of error escapes the validator (e.g., subtle role/sheet mismatch that's syntactically legal but semantically wrong), M2 will not catch it. | An out-of-band human check is the only ground-truth. |
+| **Memory consistency operationalizes "correctness" as ledger-matching.** A claim like *"the villagers are afraid"* does not appear in the ledger and therefore cannot be checked. M4 measures factual consistency over `kind ∈ {kill_npc, npc_give, npc_take, dialog_choice}` only. Tone/lore consistency is unmeasured. | Future work: extract narrative entities from `wanderer_dialog` (NER + entailment) for a softer consistency signal. |
+| **Adaptation rate as count proxies for adaptation as quality.** A continuation that incorporates the player's actions is `revisions += 1`; a continuation that ignores them is also `revisions += 1`. The metric measures *that* the system adapted, not *how well*. | Pair with M4 (memory consistency) for a partial proxy of "did the adaptation reference the actions". |
+
+#### Conclusion validity
+
+| Threat | Where it bites | Mitigation |
+|---|---|---|
+| **Small N.** Per-paper-table-style results, the per-profile $N$ should be ≥ 30 to support 95% CIs of width ≤ 0.1 on a 0-1 metric. The reported $N=15$ is a compromise driven by Groq's TPM cap. | Effect-size claims; CI widths. | Bootstrap CIs reported; sample-size limitation flagged. |
+| **No paired comparisons.** Without an ablation arm, we can only describe the configured system, not attribute its scores to specific components. | Causal claims (e.g., "the sanitizer raises pass rate by X"). | Ablation infra is straightforward (`AGQ_NO_SANITIZER=1` env-gate would suffice); future work. |
+| **Multiple comparisons.** Five metrics × four profiles × N sessions creates a comparison family of size ≥ 20; if any single outcome is reported as "significant" without correction, the family-wise error inflates. | Headline claims. | We report descriptive statistics only; significance work is explicitly out-of-scope for this artifact. |
+
+### Reproducibility
+
+Everything needed to re-run the experiment is in the repository.
+
+| Component | Source of truth | Pin |
+|---|---|---|
+| Game engine | Godot 4.6.2 (stable build, win64) | `/c/Users/wasif/Downloads/Godot_v4.6.2-stable_win64.exe/...` (path is overridable via `GODOT=` env) |
+| Primary model | `llama-3.3-70b-versatile` | `scripts/llm/quest_gen_agent.gd` `@export var model` |
+| Fast model (expansion / simple quests) | `llama-3.1-8b-instant` | `scripts/llm/quest_gen_agent.gd` `@export var expand_model` |
+| Fallback model | `gemini-2.5-flash` | `scripts/llm/gemini_client.gd` `MODEL` constant |
+| Decoding parameters | `temperature` 0.7 (default), JSON mode (`response_format: {type: "json_object"}` for Groq, `responseMimeType: "application/json"` for Gemini), no top-p / top-k overrides | `groq_client.gd::generate()`, `gemini_client.gd::generate()` |
+| RNG seed | `RandomNumberGenerator.randomize()` is called in `prompts.gd::pick_premise()` and `quest_spawner.gd::_resolve_position()` — **not seeded for reproducibility today**. To pin: set `seed(N)` in `eval_session.gd::_ready()`. | See *Determinism caveat* below. |
+| Prompt bodies | `scripts/llm/prompts.gd` (584 lines, all prompts are static functions returning strings) | Hashed via `git rev-parse HEAD:scripts/llm/prompts.gd`; commit any prompt change so the hash advances. |
+| World catalog | `scripts/llm/world_catalog.gd` (item ids, sheets, hints, objective types, action verbs, predicate prefixes) | Snapshot dumped per session as `entities.json`. |
+| Sanitizer | `scripts/llm/quest_sanitizer.gd` (751 lines) | Pinned by repo commit; `sanitizer_fix_count` payload field counts applied fixes per bundle. |
+| Validator | `scripts/llm/quest_validator.gd` (334 lines) | Pinned by repo commit. |
+| Scripted profiles | `scripts/eval/profile_*.gd` and `scripts/eval/scripted_player.gd` | Each profile is fully deterministic *modulo* RNG-derived sidesteps in the stuck-detector. |
+| Session driver | `scripts/eval_session.gd` | Reads `AGQ_PROFILE` env to pick the profile; otherwise no per-run config. |
+| Eval entrypoint | `tools/eval/run_all.sh` (and `.ps1` mirror) | Single command; `N=15` per profile by default. |
+| Metric implementation | `tools/eval/metrics.py` | Pure Python, no I/O — testable in isolation. |
+| Catalog hash | sha256 of `entities.json` | Recomputable post-hoc; record alongside results. |
+
+#### Determinism caveat
+
+The pipeline is *not* fully deterministic today. Three sources of variance:
+
+1. **LLM sampling** (temperature > 0). Even with identical prompts, repeat runs produce different bundles. Setting `temperature: 0` in `groq_client.gd::generate()` would make the model side closer-to-deterministic; we preserve sampling because the agentic claim is about *behaviour distribution*, not single-shot output.
+2. **Per-run premise selection.** `prompts.gd::pick_premise()` randomly selects from a pool of 8 seed premises. To pin, replace with index lookup keyed on `OS.get_environment("AGQ_PREMISE_IDX")`.
+3. **Per-run position randomization.** `quest_spawner.gd::_resolve_position()` adds a random jitter around compass-hint anchors. Affects gameplay (player can or can't reach NPC) but not the LLM output.
+
+For the headline numbers, we run $N$ trials per profile and report the distribution. Reproducibility means *the same distribution within sampling error*, not *the same per-trial output*.
+
+#### Re-running step-by-step
+
+```bash
+# 1. Clone, install deps
+git clone <this-repo> && cd Agentic-Quest-Generator
+python -m venv venv
+source venv/Scripts/activate            # or venv/bin/activate on Linux/Mac
+pip install -r tools/eval/requirements.txt
+
+# 2. Provide API keys
+cat > .env <<EOF
+GROQ_API_KEY=gsk_xxxxxxxxxxxx
+GEMINI_API_KEY=AIza_xxxxxxxxxx       # optional fallback
+EOF
+
+# 3. Smoke-check the pipeline (8 sessions, ~5 min)
+N=2 bash tools/eval/run_all.sh
+
+# 4. Full run (60 sessions, ~60-90 min)
+N=15 bash tools/eval/run_all.sh
+
+# 5. Inspect
+cat tools/eval/results/summary.json | python -m json.tool
+column -t -s, < tools/eval/results/results.csv | less -S
+```
+
+Expected outputs:
+
+- `tools/eval/sessions/*.jsonl` — one file per session, ~10-200 events each
+- `tools/eval/results/results.json` — per-session metrics
+- `tools/eval/results/results.csv` — flat columnar view
+- `tools/eval/results/summary.json` — aggregate (mean of session means)
+
+The only environment variables that affect behaviour are `AGQ_EVAL` (gates the EvaluationLogger), `AGQ_PROFILE` (picks the scripted profile), `GODOT` (override binary path). All others ignored.
+
+#### Hardware envelope
+
+The reference run used:
+
+- **CPU:** AMD Ryzen 5 5600 (12 logical cores)
+- **Memory:** 16 GB DDR4
+- **OS:** Windows 11 Home 26200, headless via `--headless` flag (no GPU rendering)
+- **Network:** consumer broadband, ~50 Mbps; latency to Groq's edge typically <100 ms
+
+LLM compute is remote (Groq LPU / Gemini); local hardware is not on the latency critical path. Re-running on a slower local machine should not materially shift M5 numbers — the dominant cost is round-trip + LPU inference, not Godot.
+
+### Related work
+
+The closest existing systems and the way this project differs.
+
+| Area | Representative work | What we share | Where we diverge |
+|---|---|---|---|
+| **Procedural narrative generation (PCG)** | Tracery (Compton, 2015); Ink/Inkle (Inkle Studios); Charisma.ai; Dwarf Fortress narrative emergence | Schema-level grammar over a closed entity catalog; structured output. | PCG is rule-based / template-based and produces *exhaustively pre-authored possibility space*; this project's possibility space is open (the LLM picks from the closed entity set but composes freely), and adapts in response to *post-emission* player actions. |
+| **Agentic LLM frameworks** | ReAct (Yao et al., 2022); Reflexion (Shinn et al., 2023); LangChain agents; AutoGPT | Observe-decide-act loop, tools that the agent calls into. | Our agent's "tool calls" are JSON-schema bundles consumed by a fixed engine, not external function calls; observations come from a structured *action ledger* rather than free-form text traces. The engine acts as the deterministic counterpart to the agent's stochastic generation. |
+| **LLM in interactive fiction** | AI Dungeon (Walton, 2019); Project Sentient (Charisma); Hidden Door | Continuous narrative generation conditional on player input. | AI Dungeon uses *unstructured text* generation; we use structured bundles parsed into engine state. AI Dungeon famously hallucinates entities into existence; we forbid this at the schema layer. |
+| **Constrained / structured LLM output** | Function calling (OpenAI, 2023); JSON Schema mode; Outlines (Willard et al., 2023); Guidance | Treat the LLM as a typed component of a system, not a string generator. | We layer a *deterministic sanitizer* between LLM and consumer to absorb schema-near-misses (case, whitespace, unknown ids). The sanitizer is shown to reduce post-validate retry rate from ~50% to ~5%. |
+| **Plan repair / replanning** | LPG-td (Gerevini et al., 2008); classical PDDL replanning | Observe state divergence, generate a new plan that respects the divergence. | Our "state divergence" is a free-form action ledger; our "new plan" is a JSON bundle. The sanity-check is schema validation rather than precondition satisfaction. |
+| **Game master simulation** | Robinson & Holmes, *Procedural game-master AI*; Dungeons & Dragons VTT bots | Reactive narrative arbiter responding to player actions. | We expose a single-NPC *interaction surface* (the Wanderer) for the GM rather than a system-level dungeon master. The action ledger plays the role of the GM's memory, which makes the loop reifiable as a small interface rather than an open prompt. |
+| **Quest generation evaluation** | Doran & Parberry (2010), *quest taxonomy*; Lopez & Tognelli (2022), *PCG eval*; Karth (2017), *PCG benchmarks* | Structural and content metrics over generated quests. | Existing eval is mostly *static analysis of generated content*. M3-M5 here are *runtime* metrics — adaptation rate, replanning latency, memory consistency — that only make sense for an *agentic* loop. M1-M2 align with prior structural/string-accuracy work. |
+
+Citation slots are placeholders; the partner writing the paper should fill in BibTeX entries — `[CITE: Tracery]`, `[CITE: ReAct]`, `[CITE: AIDungeon]`, `[CITE: Outlines]`, `[CITE: Doran2010]`. The evaluator code is open-source MIT (or whatever licence the repo settles on); commits and prompts hash-pinned via git.
+
+What this project contributes that the surveyed work does not, in one paragraph: a **closed-loop integration of a constrained-output LLM as a runtime planner, with deterministic input-sanitization between LLM and engine, and a measurement harness that quantifies adaptation rate + memory consistency + replanning latency over scripted-player traces**. The metrics M3-M5 are the contribution; M1-M2 ground them in established structural-correctness baselines.
+
+### Prompt appendix
+
+Every prompt the system uses, with file:line refs and a one-paragraph summary. Prompts are GDScript static functions that return concatenated string sections; the canonical text lives in `scripts/llm/prompts.gd` and is hash-pinned by git commit.
+
+| Prompt | File:line | Used for | Token budget (approx) |
+|---|---|---|---|
+| `build_system_prompt(include_fixture)` | `prompts.gd:46` | Base schema definition reused inside every other prompt. Defines the bundle's field names, world catalog, objective types, action verbs, predicate keys, hard rules. | ~3K with fixture, ~2K without |
+| `build_branching_system_prompt(name, role)` | `prompts.gd:286` | First-chapter generation when the player accepts the Wanderer's `[Yes]`. | ~7K with examples |
+| `build_orchestration_system_prompt(name, npcs, max_remaining)` | `prompts.gd:486` | Continuation/closure decision and bundle generation when the player clicks `[Report]`. | ~3K |
+| `build_orchestration_user_prompt(prev_summary, ledger)` | `prompts.gd:534` | The user-side message paired with the orchestration system prompt. Formats the action ledger as natural-language lines. | ~500 |
+| `build_repair_prompt(errors)` | `prompts.gd:569` | Re-emission prompt when validation fails. | ~200 + errors |
+| `build_simple_*` | `prompts.gd:~370+` | Single-objective fetch/kill quests for the simple NPCs (Farmer, Hunter, Old Sage). | ~1K |
+| `build_stage1_system_prompt`, `build_stage2_system_prompt` | `prompts.gd:~400+` | Mystic two-stage moral-choice quest. | ~2K each |
+| `build_expand_node_system_prompt(ctx)` | `prompts.gd:~430+` | Lazy dialog expansion for `__expand__` placeholders. | ~500 |
+
+#### Verbatim: orchestration system prompt (the most novel one)
+
+This is the prompt that fires every time the player clicks `[Report]`. The decision-output contract and the FORBIDDEN block are the most paper-relevant parts.
+
+```text
+You are the village's storyteller (the NPC '<NAME>'). The player is on an
+active branching quest you previously gave them. They have just walked
+back to you to report what they've done.
+
+Your job: read the action ledger and the previous quest's premise, then
+DECIDE one of two things:
+  - 'continue' : the central conflict is unresolved. Issue a NEW chapter
+                 (full quest bundle) that picks up the threads — including
+                 any UNEXPECTED actions the player took. Treat unexpected
+                 actions as creative seeds, NEVER as fail conditions:
+                 a surprise kill becomes a new villain reveal,
+                 a theft becomes a heist subplot,
+                 a dialog twist becomes new lore.
+  - 'complete' : the player has resolved or definitively closed the
+                 central conflict. Emit a closing epilogue with rewards.
+
+Output ONE JSON object with EXACTLY these keys:
+{
+  "decision":         "continue" | "complete",
+  "wanderer_dialog":  "2-4 sentences in your voice — your reaction to
+                       what the player did. Mandatory.",
+  "memory_claims":    [ ... optional, see below ... ],
+  "new_quest":        {full quest+npcs+items bundle, same shape as
+                       branching bundle}                  // ONLY if
+                                                          // decision=continue
+  "rewards":          [ {"item_id": "...", "count": int} ] // ONLY if
+                                                          // decision=complete
+}
+
+MEMORY CLAIMS (optional but encouraged when wanderer_dialog references
+the player's past actions):
+  Each claim describes ONE action the wanderer's dialog references.
+  The engine cross-checks claims against the action ledger (the actions
+  you can see above) for factual accuracy.
+  Claim shape: { "kind": "kill_npc"|"npc_give"|"npc_take"|"dialog_choice",
+                 "params": {...subset of the ledger entry's params...} }
+  Examples:
+    "I heard you killed Silas."
+       → { "kind": "kill_npc",  "params": { "npc_name": "Silas" } }
+    "You gave the gem to the priest."
+       → { "kind": "npc_give",  "params": { "npc_name": "Priest",
+                                            "item_id": "gem_red" } }
+  Only emit a claim for actions that ACTUALLY appear in the ledger.
+  Don't invent.
+  If wanderer_dialog doesn't reference any specific past action,
+  omit memory_claims or use [].
+
+PACING: at most <N> more continuations remain before the engine forces
+a closing. Pace your story arc accordingly.
+
+CONTINUATION REQUIREMENTS — when decision='continue':
+  - new_quest.npcs MUST contain AT LEAST 1 NEW NPC the player hasn't
+    met yet (a name not in EXISTING NPCS list above). Empty npcs[]
+    makes the chapter feel hollow — the player has nothing fresh to
+    interact with.
+  - Spawn 2-3 new NPCs ideally: a new antagonist or witness, a new
+    ally or victim, etc.
+  - Existing NPCs may still be referenced in the new chapter's
+    objectives, but they can't be the ONLY content.
+
+[when max_remaining ≤ 1:]
+  → STRONGLY prefer 'complete' this turn; the arc is at its end.
+
+Existing NPCs (continuation may reuse, kill, or replace them by spawning
+new ones in new_quest.npcs):
+  - <NPC1>
+  - <NPC2>
+  - ...
+
+WHEN decision='continue', new_quest MUST follow this schema:
+<inlined build_system_prompt(false) — schema, catalog, hard rules>
+
+Strict JSON. First char `{`, last char `}`. No markdown.
+```
+
+#### Verbatim: orchestration user prompt template
+
+```text
+PREVIOUS QUEST: <title> — <description>
+PREVIOUS BRANCHES (advisory only — they did NOT auto-complete the quest):
+  - <branch_id>: <branch_description>
+  - ...
+
+ACTION LEDGER (what the player has actually done, oldest → newest):
+  - killed <npc_name>
+  - gave <item_id> to <npc_name>
+  - took <item_id> from <npc_name>
+  - picked '<choice_id>' with <npc_name>
+
+Decide and emit the JSON now.
+```
+
+#### The FORBIDDEN block (verbatim, from the branching prompt's top and bottom)
+
+This block is intentionally duplicated at the *start* and *end* of the system prompt because LLMs over-weight first/last instructions (positional bias).
+
+```text
+FORBIDDEN — the engine will reject these outright:
+  ❌ "Find me at the old mine." | ✅ "Talk to the Wanderer — he knows
+                                       what to do next."
+  ❌ "Meet me at midnight."     | ✅ "Bring back the gem and the
+                                       Wanderer will explain."
+  ❌ "Follow the hooded figure" | ✅ "Confront <named NPC> directly."
+  ❌ "Investigate the windmill" | ✅ "Talk to <named NPC> who saw it."
+
+Before emitting JSON, scan every choice.text and node.text. If any
+contains windmill / mine / midnight / inn / cave / forest / follow /
+lead-me-to / accompany → rewrite to use a named NPC and a concrete
+in-engine action (talk / give / take / kill / dialog choice).
+```
+
+The forbidden vocabulary covers: locations the engine doesn't render (mines, caves, windmills, inns, forests), time-of-day mechanics (midnight, dawn, dusk), follow-NPC mechanics (NPCs are stationary in this world).
+
+### JSON Schema specification
+
+A formal `application/schema+json` (Draft 2020-12) document describing the bundle the LLM emits. The validator (`scripts/llm/quest_validator.gd`, 334 lines) is the authoritative implementation; this schema is a derived projection for paper-citing and external tooling.
+
+```jsonc
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/agentic-quest-generator/bundle.schema.json",
+  "title": "QuestBundle",
+  "type": "object",
+  "required": ["quest", "npcs"],
+  "properties": {
+    "quest": { "$ref": "#/$defs/Quest" },
+    "npcs":  { "type": "array", "items": { "$ref": "#/$defs/NPC" } },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/ItemSpawn" } }
+  },
+  "$defs": {
+    "Identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "maxLength": 64,
+      "description": "ASCII lowercase a-z, digits, underscore, hyphen."
+    },
+    "Quest": {
+      "type": "object",
+      "required": ["id", "title", "branches"],
+      "properties": {
+        "id":          { "$ref": "#/$defs/Identifier" },
+        "title":       { "type": "string", "maxLength": 80 },
+        "description": { "type": "string", "maxLength": 600 },
+        "sequential":  { "type": "boolean" },
+        "objectives":  { "type": "array", "items": { "$ref": "#/$defs/Objective" } },
+        "rewards":     { "type": "array", "items": { "$ref": "#/$defs/Reward" } },
+        "branches":    {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/Branch" }
+        },
+        "fail_conditions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FailCondition" }
+        },
+        "orchestrator_managed": { "type": "boolean" }
+      }
+    },
+    "Branch": {
+      "type": "object",
+      "required": ["id", "objectives", "rewards"],
+      "properties": {
+        "id":             { "$ref": "#/$defs/Identifier" },
+        "description":    { "type": "string" },
+        "requires_flags": { "$ref": "#/$defs/PredicateMap" },
+        "objectives":     { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Objective" } },
+        "rewards":        { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Reward" } }
+      }
+    },
+    "Objective": {
+      "type": "object",
+      "required": ["type", "params"],
+      "properties": {
+        "type": {
+          "enum": ["collect", "drop", "give", "take", "talk", "kill_npc", "kill_enemy", "dialog_choice"]
+        },
+        "params":      { "type": "object" },
+        "required":    { "type": "integer", "minimum": 1 },
+        "description": { "type": "string" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "kill_npc" } } },
+          "then": { "properties": { "params": { "required": ["npc_name"] } } } },
+        { "if": { "properties": { "type": { "const": "give" } } },
+          "then": { "properties": { "params": { "required": ["npc_name", "item_id"] } } } },
+        { "if": { "properties": { "type": { "const": "talk" } } },
+          "then": { "properties": { "params": { "required": ["npc_name"] } } } }
+      ]
+    },
+    "Reward": {
+      "type": "object",
+      "required": ["item_id", "count"],
+      "properties": {
+        "item_id": { "$ref": "#/$defs/Identifier" },
+        "count":   { "type": "integer", "minimum": 1 }
+      }
+    },
+    "NPC": {
+      "type": "object",
+      "required": ["npc_name", "character_sheet", "position_hint", "dialog_tree"],
+      "properties": {
+        "npc_name":         { "type": "string", "maxLength": 32 },
+        "character_sheet":  { "type": "string",
+                              "description": "Must be a folder under assets/characters/" },
+        "role":             { "type": "string" },
+        "position_hint":    { "enum": ["nw","ne","sw","se","n","s","e","w","center","near_player"] },
+        "max_health":       { "type": "integer", "minimum": 1 },
+        "initial_items":    {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "count"],
+            "properties": {
+              "id":    { "$ref": "#/$defs/Identifier" },
+              "count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "dialog_start": { "type": "string" },
+        "start_nodes":  {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["node"],
+            "properties": {
+              "node":     { "type": "string" },
+              "requires": { "$ref": "#/$defs/PredicateMap" }
+            }
+          }
+        },
+        "dialog_tree": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/DialogNode" }
+        }
+      }
+    },
+    "DialogNode": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text":    { "type": "string" },
+        "choices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "text"],
+            "properties": {
+              "id":        { "$ref": "#/$defs/Identifier" },
+              "text":      { "type": "string" },
+              "next":      { "type": "string",
+                             "description": "Either a node id, 'end', or '__expand__'" },
+              "next_hint": { "type": "string",
+                             "description": "One-line description used for lazy expansion" },
+              "requires":  { "$ref": "#/$defs/PredicateMap" },
+              "actions":   {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "description": "Action verb. Either a bare verb (die | drop_inventory) or 'verb:arg' (give_player:item_id | take_player:item_id | set_flag:k=v | remember:k=v)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "ItemSpawn": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id":            { "$ref": "#/$defs/Identifier" },
+        "position_hint": { "enum": ["nw","ne","sw","se","n","s","e","w","center","near_player"] }
+      }
+    },
+    "PredicateMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "description": "Predicate values. Predicate keys must use one of the prefixes 'flag:', 'quest:', 'inv:', 'memory:NPC.field'. Operators on values: '==', '>=', '<=', '!=' or bare equality."
+      }
+    },
+    "FailCondition": {
+      "type": "object",
+      "properties": {
+        "type":   { "enum": ["npc_dead", "item_lost", "flag_set"] },
+        "params": { "type": "object" }
+      }
+    }
+  }
+}
+```
+
+Out-of-band invariants the schema cannot express (and that the validator additionally checks):
+
+- Every `npc_name` referenced in objectives must appear either in `bundle.npcs[]` or in the externally-supplied `extra_known_npcs` list (the hand-placed Wanderer).
+- Every `item_id` must be in `ItemDB.all_ids()`.
+- Every `character_sheet` must correspond to a real `assets/characters/<sheet>/` folder.
+- Dialog `next` must point at a real node id, `"end"`, or `"__expand__"`.
+- `actions` strings parse with the action grammar above (verb / verb:arg).
+- `requires` strings parse with the predicate grammar above.
+
+These are enforced in `quest_validator.gd::validate(bundle, extra_known_npcs)` which returns `Array[String]` of human-readable errors; an empty array indicates a fully-valid bundle.
 
 ## Running the project
 

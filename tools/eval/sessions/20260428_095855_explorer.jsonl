@@ -1,2 +1,0 @@
-{"agent":"main","event_type":"session_start","payload":{"profile":"explorer","world_npcs":["Farmer","Hunter","Old Sage","Mystic","Wanderer"]},"session_id":"20260428_095855_explorer","timestamp_ms":329}
-{"agent":"QuestGenAgent","event_type":"quest_generated","payload":{"attempt":1,"branch_count":4,"elapsed_ms":4770,"model":"llama-3.3-70b-versatile","npc_count":3,"parsed_ok":true,"phase":"branching","quest_id":"wanderers_request","raw_text_len":5892,"sanitizer_fix_count":6,"schema_valid":true},"session_id":"20260428_095855_explorer","timestamp_ms":13842}
