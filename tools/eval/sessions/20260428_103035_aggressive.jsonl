@@ -1,0 +1,6 @@
+{"agent":"main","event_type":"session_start","payload":{"profile":"aggressive","world_npcs":["Farmer","Hunter","Old Sage","Mystic","Wanderer"]},"session_id":"20260428_103035_aggressive","timestamp_ms":351}
+{"agent":"QuestGenAgent","event_type":"quest_generated","payload":{"attempt":1,"branch_count":4,"elapsed_ms":5972,"model":"llama-3.3-70b-versatile","npc_count":3,"parsed_ok":true,"phase":"branching","quest_id":"wanderer_quest","raw_text_len":9482,"sanitizer_fix_count":5,"schema_valid":true},"session_id":"20260428_103035_aggressive","timestamp_ms":17151}
+{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"thief"}},"session_id":"20260428_103035_aggressive","timestamp_ms":19543}
+{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"guard"}},"session_id":"20260428_103035_aggressive","timestamp_ms":22048}
+{"agent":"ScriptedPlayer","event_type":"session_end","payload":{"duration_ms":90009,"orchestrations_seen":1,"profile":"aggressive","reason":"wall_clock_timeout"},"session_id":"20260428_103035_aggressive","timestamp_ms":90360}
+{"agent":"main","event_type":"session_end","payload":{"duration_ms":90226,"reason":"window_close_or_predelete"},"session_id":"20260428_103035_aggressive","timestamp_ms":90368}

@@ -15,9 +15,22 @@ from typing import Any
 # --------------------------------------------------------------------------
 
 def structural_adherence(events: list[dict]) -> dict[str, Any]:
-    quests = [e for e in events if e["event_type"] == "quest_generated"]
+    # Split transport-failures (LLM 429s) from real generation outcomes.
+    # A quota-exhausted run can produce hundreds of `quest_generated`
+    # events with `transport_failed: true` and `parsed_ok: false`; those
+    # tell us nothing about the model's structural compliance. Bucket
+    # them separately so M1 reports compliance over real attempts.
+    all_quests = [e for e in events if e["event_type"] == "quest_generated"]
+    transport_failed = [q for q in all_quests if q["payload"].get("transport_failed")]
+    quests = [q for q in all_quests if not q["payload"].get("transport_failed")]
     if not quests:
-        return {"n": 0, "pass_rate": None, "parse_rate": None}
+        return {
+            "n": 0,
+            "pass_rate": None,
+            "parse_rate": None,
+            "n_transport_failed": len(transport_failed),
+            "n_total_attempts": len(all_quests),
+        }
     parsed = [q for q in quests if q["payload"].get("parsed_ok")]
     valid = [q for q in parsed if q["payload"].get("schema_valid")]
     return {
@@ -28,6 +41,8 @@ def structural_adherence(events: list[dict]) -> dict[str, Any]:
         "avg_sanitizer_fixes": mean(
             q["payload"].get("sanitizer_fix_count", 0) for q in quests
         ),
+        "n_transport_failed": len(transport_failed),
+        "n_total_attempts": len(all_quests),
     }
 
 
@@ -70,9 +85,12 @@ def _categorise(err: str) -> str:
 
 
 def string_accuracy(events: list[dict], entities: dict[str, set[str]]) -> dict[str, Any]:
-    quests = [e for e in events if e["event_type"] == "quest_generated"]
+    # Same transport-vs-real split as structural_adherence — string
+    # accuracy is undefined for transport failures (the LLM never replied).
+    all_quests = [e for e in events if e["event_type"] == "quest_generated"]
+    quests = [q for q in all_quests if not q["payload"].get("transport_failed")]
     if not quests:
-        return {"n": 0, "accuracy": None}
+        return {"n": 0, "accuracy": None, "n_transport_failed": len(all_quests) - len(quests)}
     by_cat: dict[str, list[int]] = {"npc": [], "item": [], "sheet": [], "hint": [], "other": []}
     successes = 0
     for q in quests:
@@ -155,26 +173,54 @@ def memory_consistency(events: list[dict]) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 def replanning_latency(events: list[dict]) -> dict[str, Any]:
-    triggers = {}
-    completions = []
+    # Pair each replan_triggered with the NEXT replan_completed for the
+    # same prev_quest_id, in event order. Using a per-quest_id queue so
+    # repeated same-quest replans (e.g., quota retry loop) match in
+    # chronological order rather than collapsing to "latest trigger
+    # always wins" (which produced negative latencies).
+    #
+    # We split SUCCESSFUL replans (ok=True) from failed replans because
+    # a fast HTTP 429 fail can take <1s — averaging it with a real
+    # 5-second LLM generation skews the headline number. The metric for
+    # paper purposes is the latency of *useful* continuations.
+    from collections import defaultdict, deque
+    pending: dict[str, deque[int]] = defaultdict(deque)
+    successful: list[int] = []
+    failed: list[int] = []
     for e in events:
         et = e["event_type"]
         if et == "replan_triggered":
-            triggers[e["payload"].get("prev_quest_id", "")] = e["timestamp_ms"]
+            pending[e["payload"].get("prev_quest_id", "")].append(e["timestamp_ms"])
         elif et == "replan_completed":
             qid = e["payload"].get("prev_quest_id", "")
-            if qid in triggers:
-                completions.append(e["timestamp_ms"] - triggers[qid])
-    if not completions:
-        return {"n": 0}
-    s = sorted(completions)
-    return {
-        "n": len(s),
-        "mean_ms": mean(s),
-        "median_ms": median(s),
-        "p95_ms": s[int(len(s) * 0.95)] if len(s) >= 20 else s[-1],
-        "max_ms": max(s),
+            if pending[qid]:
+                t_trigger = pending[qid].popleft()
+                delta = e["timestamp_ms"] - t_trigger
+                if delta < 0:
+                    continue  # defensive — out-of-order
+                if e["payload"].get("ok"):
+                    successful.append(delta)
+                else:
+                    failed.append(delta)
+    out: dict[str, Any] = {
+        "n": len(successful),
+        "n_failed": len(failed),
     }
+    if successful:
+        s = sorted(successful)
+        out.update({
+            "mean_ms": mean(s),
+            "median_ms": median(s),
+            "p95_ms": s[int(len(s) * 0.95)] if len(s) >= 20 else s[-1],
+            "max_ms": max(s),
+        })
+    if failed:
+        f = sorted(failed)
+        out.update({
+            "failed_mean_ms": mean(f),
+            "failed_median_ms": median(f),
+        })
+    return out
 
 
 # --------------------------------------------------------------------------

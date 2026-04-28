@@ -1,0 +1,7 @@
+{"agent":"main","event_type":"session_start","payload":{"profile":"aggressive","world_npcs":["Farmer","Hunter","Old Sage","Mystic","Wanderer"]},"session_id":"20260428_102429_aggressive","timestamp_ms":356}
+{"agent":"QuestGenAgent","event_type":"quest_generated","payload":{"attempt":1,"branch_count":5,"elapsed_ms":6640,"model":"llama-3.3-70b-versatile","npc_count":4,"parsed_ok":true,"phase":"branching","quest_id":"shadows_in_village","raw_text_len":10965,"sanitizer_fix_count":4,"schema_valid":true},"session_id":"20260428_102429_aggressive","timestamp_ms":16982}
+{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"Innkeeper"}},"session_id":"20260428_102429_aggressive","timestamp_ms":17724}
+{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"Thief"}},"session_id":"20260428_102429_aggressive","timestamp_ms":20228}
+{"agent":"QuestManager","event_type":"player_action","payload":{"kind":"kill_npc","params":{"npc_name":"Betrayer"}},"session_id":"20260428_102429_aggressive","timestamp_ms":22726}
+{"agent":"ScriptedPlayer","event_type":"session_end","payload":{"duration_ms":90011,"orchestrations_seen":1,"profile":"aggressive","reason":"wall_clock_timeout"},"session_id":"20260428_102429_aggressive","timestamp_ms":90367}
+{"agent":"main","event_type":"session_end","payload":{"duration_ms":90235,"reason":"window_close_or_predelete"},"session_id":"20260428_102429_aggressive","timestamp_ms":90375}
